@@ -1,0 +1,19 @@
+# Only the mod's own source and notes are kept here.
+# Never commit game files, MW2/RE4 assets, the MW2 runtime or account.dat.
+/iw4l-runtime/
+/re4-removed-mods/
+/third_party/
+/builds/
+/host/build/
+account.dat
+*.exe
+*.dll
+*.asi
+*.pdb
+*.obj
+*.lib
+*.ff
+*.iwd
+*.log
+*.bak
+*.lnk

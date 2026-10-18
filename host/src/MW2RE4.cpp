@@ -1,0 +1,2272 @@
+// MW2RE4.asi - host plugin that runs Call of Duty: Modern Warfare 2 gameplay inside RE4 UHD.
+// The real MW2 runtime (IW4L, adapted in MW2-GTA, unchanged here) runs as its own process and owns
+// movement, camera, weapons, animations, HUD and combat audio. This plugin feeds it RE4's room
+// collision and the player's input, then makes Leon and RE4's camera follow it and draws MW2's
+// weapon/HUD image over RE4. Shared memory protocol v4, same as MW2-GTA.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <d3d9.h>
+#include <d3dcompiler.h>
+#include <algorithm>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+#include "Protocol.h"
+#include "Re4Game.h"
+
+namespace
+{
+using namespace mw2gta;
+constexpr const char* kVersion = "MW2RE4 v15 (RE4 captions moved up)";
+constexpr float Pi = 3.14159265358979323846f;
+
+// ---------------------------------------------------------------- log
+FILE* g_log = nullptr;
+CRITICAL_SECTION g_logLock;
+char g_dir[MAX_PATH]; // folder of the ASI, with trailing backslash
+
+void Log(const char* fmt, ...)
+{
+    if (!g_log)
+        return;
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    EnterCriticalSection(&g_logLock);
+    fprintf(g_log, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(g_log, fmt, args);
+    va_end(args);
+    fputc('\n', g_log);
+    fflush(g_log);
+    LeaveCriticalSection(&g_logLock);
+}
+
+void OpenLog()
+{
+    InitializeCriticalSection(&g_logLock);
+    char path[MAX_PATH], prev[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.log", g_dir);
+    snprintf(prev, sizeof(prev), "%sMW2RE4.prev.log", g_dir);
+    MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
+    g_log = _fsopen(path, "w", _SH_DENYWR);
+}
+
+// ---------------------------------------------------------------- settings
+struct Settings
+{
+    std::string runtimeDir = "F:\\ModProjects\\MW2-RE4\\iw4l-runtime";
+    std::string runtimeExe = "iw4l-re4.exe";
+    std::string settingsFile = "re4-bridge-settings.cfg";
+    std::string mappingName = "MW2RE4_v1";
+    int toggleKey = VK_F6;
+    float fov = 90.f;              // MW2 field of view setting
+    float unitsPerMeter = 1000.f;  // RE4 units per metre
+    float mouseScale = 1.f;        // multiplies RE4's mouse deltas before MW2's own sensitivity
+    float collisionRadius = 14.f;  // metres around the player sent to MW2
+    int hidePlayer = 1;
+    int invertMouseY = 0;
+    int showControls = 1;
+    int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
+    int rifleWeapon = 0x01; // RE4 weapon whose damage MW2 assault rifles and LMGs use (1 = handgun; was Chicago 0x0C)
+    float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
+    float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
+    int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
+    int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
+} g_cfg;
+
+// MW2 picks the player's arms and body from the map's soldier kit, so the skin is chosen by the map MW2
+// loads (only its weapons and soldiers are used; RE4 supplies the world). Takes effect when MW2 starts.
+struct Skin { const char* name; const char* map; };
+const Skin kSkins[] = {
+    { "Task Force 141 (desert)", "mp_rust" },
+    { "Task Force 141 (urban)", "mp_favela" },
+    { "Task Force 141 (snow)", "mp_derail" },
+    { "US Army Rangers", "mp_invasion" },
+    { "Navy SEALs", "mp_subbase" },
+};
+constexpr int kSkinCount = sizeof(kSkins) / sizeof(kSkins[0]);
+
+std::string IniString(const char* path, const char* key, const std::string& def)
+{
+    char buf[MAX_PATH];
+    GetPrivateProfileStringA("MW2RE4", key, def.c_str(), buf, sizeof(buf), path);
+    return buf;
+}
+
+float IniFloat(const char* path, const char* key, float def)
+{
+    char buf[64], defBuf[64];
+    snprintf(defBuf, sizeof(defBuf), "%g", def);
+    GetPrivateProfileStringA("MW2RE4", key, defBuf, buf, sizeof(buf), path);
+    return (float)atof(buf);
+}
+
+void LoadSettings()
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    g_cfg.runtimeDir = IniString(path, "RuntimeDir", g_cfg.runtimeDir);
+    g_cfg.runtimeExe = IniString(path, "RuntimeExecutable", g_cfg.runtimeExe);
+    g_cfg.settingsFile = IniString(path, "RuntimeSettings", g_cfg.settingsFile);
+    g_cfg.mappingName = IniString(path, "MappingName", g_cfg.mappingName);
+    g_cfg.toggleKey = GetPrivateProfileIntA("MW2RE4", "ToggleKey", g_cfg.toggleKey, path);
+    g_cfg.fov = std::clamp(IniFloat(path, "FOV", g_cfg.fov), 50.f, 120.f);
+    g_cfg.unitsPerMeter = std::clamp(IniFloat(path, "UnitsPerMeter", g_cfg.unitsPerMeter), 10.f, 10000.f);
+    g_cfg.mouseScale = std::clamp(IniFloat(path, "MouseScale", g_cfg.mouseScale), 0.01f, 100.f);
+    g_cfg.collisionRadius = std::clamp(IniFloat(path, "CollisionRadius", g_cfg.collisionRadius), 4.f, 40.f);
+    g_cfg.hidePlayer = GetPrivateProfileIntA("MW2RE4", "HideLeon", g_cfg.hidePlayer, path);
+    g_cfg.invertMouseY = GetPrivateProfileIntA("MW2RE4", "InvertMouseY", g_cfg.invertMouseY, path);
+    g_cfg.showControls = GetPrivateProfileIntA("MW2RE4", "ShowControls", g_cfg.showControls, path);
+    g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
+    g_cfg.promptRaise = IniFloat(path, "PromptRaise", g_cfg.promptRaise);
+    g_cfg.messageRaise = IniFloat(path, "MessageRaise", g_cfg.messageRaise);
+    g_cfg.infiniteAmmo = GetPrivateProfileIntA("MW2RE4", "InfiniteAmmo", g_cfg.infiniteAmmo, path);
+    g_cfg.skin = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "Skin", g_cfg.skin, path), 0, kSkinCount - 1);
+    g_cfg.rifleWeapon = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "RifleWeapon", g_cfg.rifleWeapon, path), 0x01, 0x21);
+    Log("settings: RuntimeDir=%s RuntimeExecutable=%s RuntimeSettings=%s MappingName=%s ToggleKey=0x%X FOV=%.1f "
+        "UnitsPerMeter=%.1f MouseScale=%.2f CollisionRadius=%.1f HideLeon=%d InvertMouseY=%d",
+        g_cfg.runtimeDir.c_str(), g_cfg.runtimeExe.c_str(), g_cfg.settingsFile.c_str(), g_cfg.mappingName.c_str(),
+        g_cfg.toggleKey, g_cfg.fov, g_cfg.unitsPerMeter, g_cfg.mouseScale, g_cfg.collisionRadius, g_cfg.hidePlayer,
+        g_cfg.invertMouseY);
+}
+
+// ---------------------------------------------------------------- pattern scan
+struct Module
+{
+    uint8_t* base = nullptr;
+    struct Range { uint8_t* begin; size_t size; };
+    std::vector<Range> code;
+};
+
+Module ReadModule()
+{
+    Module m;
+    m.base = (uint8_t*)GetModuleHandleA(nullptr);
+    auto dos = (IMAGE_DOS_HEADER*)m.base;
+    auto nt = (IMAGE_NT_HEADERS*)(m.base + dos->e_lfanew);
+    auto sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec)
+        if (sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            m.code.push_back({ m.base + sec->VirtualAddress, sec->Misc.VirtualSize });
+    return m;
+}
+
+std::vector<uint8_t*> Scan(const Module& m, const char* text)
+{
+    std::vector<int> pat;
+    for (const char* p = text; *p;)
+    {
+        if (*p == ' ') { ++p; continue; }
+        if (*p == '?') { pat.push_back(-1); ++p; continue; }
+        pat.push_back((int)strtoul(p, nullptr, 16));
+        p += 2;
+    }
+    std::vector<uint8_t*> hits;
+    for (auto& r : m.code)
+        for (size_t i = 0; r.size >= pat.size() && i + pat.size() <= r.size; ++i)
+        {
+            size_t k = 0;
+            while (k < pat.size() && (pat[k] < 0 || r.begin[i + k] == (uint8_t)pat[k]))
+                ++k;
+            if (k == pat.size())
+                hits.push_back(r.begin + i);
+        }
+    return hits;
+}
+
+// Returns the address of the wanted value (match + offset), or null.
+uint8_t* Find(const Module& m, const re4::Pattern& p)
+{
+    auto hits = Scan(m, p.bytes);
+    bool ok = hits.size() == 1;
+    if (p.sameValueOk && hits.size() > 1)
+    {
+        ok = true;
+        for (auto* h : hits)
+            ok = ok && *(uint32_t*)(h + p.offset) == *(uint32_t*)(hits[0] + p.offset);
+    }
+    if (!ok)
+    {
+        Log("pattern %s: %zu matches (need exactly 1)", p.name, hits.size());
+        return nullptr;
+    }
+    Log("pattern %s: found at bio4.exe+0x%X (%zu match%s)", p.name, (unsigned)(hits[0] - m.base), hits.size(),
+        hits.size() == 1 ? "" : "es, same value");
+    return hits[0] + p.offset;
+}
+
+bool HookCall(uint8_t* site, void* hook, void** orig)
+{
+    if (site[0] != 0xE8)
+    {
+        Log("hook: expected CALL (E8) at bio4.exe+0x%X, found %02X",
+            (unsigned)(site - (uint8_t*)GetModuleHandleA(nullptr)), site[0]);
+        return false;
+    }
+    *orig = site + 5 + *(int32_t*)(site + 1);
+    DWORD old;
+    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old))
+        return false;
+    *(int32_t*)(site + 1) = (int32_t)((uint8_t*)hook - (site + 5));
+    VirtualProtect(site, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    return true;
+}
+
+// The thunk is a JMP rel32 shared by every caller: point it at the hook.
+bool HookThunk(uint8_t* thunk, void* hook, void** orig)
+{
+    if (thunk[0] != 0xE9)
+    {
+        Log("hook: expected JMP (E9) thunk at bio4.exe+0x%X, found %02X",
+            (unsigned)(thunk - (uint8_t*)GetModuleHandleA(nullptr)), thunk[0]);
+        return false;
+    }
+    *orig = thunk + 5 + *(int32_t*)(thunk + 1);
+    DWORD old;
+    if (!VirtualProtect(thunk, 5, PAGE_EXECUTE_READWRITE, &old))
+        return false;
+    *(int32_t*)(thunk + 1) = (int32_t)((uint8_t*)hook - (thunk + 5));
+    VirtualProtect(thunk, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), thunk, 5);
+    return true;
+}
+
+// ---------------------------------------------------------------- game access
+uint8_t** g_pG = nullptr;      // GLOBAL_WK**
+uint8_t** g_pPL = nullptr;     // cPlayer**
+int32_t* g_mouseX = nullptr;   // DirectInput mouse deltas
+int32_t* g_mouseY = nullptr;
+uint8_t* g_satMgr = nullptr;   // cSatMgr*
+uint64_t* g_keyOn = nullptr;   // RE4 button words
+uint64_t* g_keyTrg = nullptr;
+uint8_t* g_joy = nullptr;      // JOY[0]
+uint8_t* g_emMgr = nullptr;    // cManager<cEm>*
+uint8_t* g_actBtnActive = nullptr; // bool: RE4 action prompt on screen
+using BulletHitFn = int(__cdecl*)(void* attacker, Vec3* start, Vec3* end, int weaponNo, int flags, float f);
+BulletHitFn g_bulletHit = nullptr;
+using EffectFn = void(__cdecl*)(int, int, Vec3*, int, int, int, int, int, int, int);
+using SoundFn = void(__cdecl*)(int, int, Vec3*, int, int, int);
+EffectFn g_effect = nullptr;
+SoundFn g_sound = nullptr;
+uint8_t* g_qteActive = nullptr;
+uint8_t* g_idSys = nullptr;
+uint8_t* g_textBegin = nullptr, *g_textEnd = nullptr; // bio4.exe code range, for stack walks
+
+template <class T> T& At(uint8_t* base, size_t off) { return *(T*)(base + off); }
+uint8_t* Global() { return g_pG ? *g_pG : nullptr; }
+uint8_t* Player()
+{
+    if (!g_pPL || !*g_pPL)
+        return nullptr;
+    if (**(uintptr_t**)g_pPL < 0x10000) // vtable sanity check, as re4_tweaks does
+        return nullptr;
+    return *g_pPL;
+}
+
+// RE4 (mm, Y up) <-> bridge host space (metres, Z up, same axes as GTA/IW4). A proper rotation,
+// so triangle winding and handedness are preserved.
+void ToHost(const Vec3& v, float out[3])
+{
+    out[0] = v.x / g_cfg.unitsPerMeter;
+    out[1] = -v.z / g_cfg.unitsPerMeter;
+    out[2] = v.y / g_cfg.unitsPerMeter;
+}
+Vec3 ToRe4(const float h[3]) { return { h[0] * g_cfg.unitsPerMeter, h[2] * g_cfg.unitsPerMeter, -h[1] * g_cfg.unitsPerMeter }; }
+Vec3 DirToRe4(const float h[3]) { return { h[0], h[2], -h[1] }; }
+
+// ---------------------------------------------------------------- bridge state
+HANDLE g_mapping = nullptr, g_controlMutex = nullptr, g_frameMutex = nullptr, g_sceneMutex = nullptr;
+uint8_t* g_shared = nullptr;
+PROCESS_INFORMATION g_child{};
+Host g_host{};
+Guest g_guest{};
+HostMovement g_hostMovement{};
+GuestMovement g_guestMovement{};
+GuestCamera g_guestCamera{};
+bool g_requested = false, g_active = false;
+DWORD g_runtimeStarted = 0, g_unreadySince = 0, g_lastTime = 0;
+bool g_runtimeWasReady = false;
+std::string g_runtimeError;
+float g_yaw = 0, g_pitch = 0, g_mouseTotalX = 0, g_mouseTotalY = 0;
+uint32_t g_lastShot = 0, g_shotsSeen = 0, g_sceneSequence = 0;
+DWORD g_lastScene = 0;
+uint32_t g_sceneCount = 0;
+bool g_sceneOverflow = false;
+uint32_t g_savedStop = 0, g_savedDisp = 0;
+bool g_keyWasDown = false;
+bool g_helpKeyWasDown = false;
+// Weapon menu (F8): MW2's own catalog, filtered to what fits RE4. F9 refills ammo.
+Features g_features{};
+std::vector<CatalogEntry> g_catalog;   // filtered, as shown
+std::vector<CatalogEntry> g_catalogAll; // everything MW2 sent, for naming shots
+uint32_t g_catalogSource = 0;          // MW2 catalog size the filtered list was built from
+bool g_weaponMenu = false;
+bool g_settingsMenu = false;
+int g_settingsRow = 0;
+bool MenuOpen() { return g_weaponMenu || g_settingsMenu; }
+size_t g_selected = 0;
+uint32_t g_request = 0, g_requestKind = 0, g_requestWeapon = 0;
+std::string g_notice;
+DWORD g_noticeUntil = 0;
+bool g_prevKeys[256]{};
+float g_mousePendingX = 0, g_mousePendingY = 0; // RE4 mouse movement collected in PadRead, consumed by Exchange
+int g_lastHp = -1;
+DWORD g_damageUntil = 0;
+float g_damageStrength = 0;
+volatile LONG g_hitCheckFrame = 0; // frame number when the over-the-shoulder camera last ran
+LONG g_frame = 0;
+DWORD g_lastTick = 0; // last frame RE4 ran gameplay (camera); stale = paused or in a menu
+
+struct Lock
+{
+    HANDLE handle;
+    bool acquired;
+    explicit Lock(HANDLE h) : handle(h), acquired(false)
+    {
+        if (h) { DWORD s = WaitForSingleObject(h, 0); acquired = s == WAIT_OBJECT_0 || s == WAIT_ABANDONED; }
+    }
+    ~Lock() { if (acquired) ReleaseMutex(handle); }
+};
+
+std::wstring Wide(const std::string& s)
+{
+    int n = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(n ? n - 1 : 0, L'\0');
+    if (n)
+        MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, w.data(), n);
+    return w;
+}
+
+bool CreateBridge()
+{
+    std::wstring name = L"Local\\" + Wide(g_cfg.mappingName);
+    g_mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, MappingSize, name.c_str());
+    if (!g_mapping)
+        return false;
+    bool existing = GetLastError() == ERROR_ALREADY_EXISTS;
+    g_shared = (uint8_t*)MapViewOfFile(g_mapping, FILE_MAP_ALL_ACCESS, 0, 0, MappingSize);
+    g_controlMutex = CreateMutexW(nullptr, FALSE, (name + L"_control").c_str());
+    g_frameMutex = CreateMutexW(nullptr, FALSE, (name + L"_frame").c_str());
+    g_sceneMutex = CreateMutexW(nullptr, FALSE, (name + L"_scene").c_str());
+    if (!g_shared || !g_controlMutex || !g_frameMutex || !g_sceneMutex)
+        return false;
+    Lock lock(g_controlMutex);
+    if (!lock.acquired)
+        return false;
+    if (!existing)
+        ZeroMemory(g_shared, MappingSize);
+    auto* c = (Control*)g_shared;
+    c->magic = Magic;
+    c->version = Version;
+    c->host.tick = GetTickCount();
+    c->host.shutdown = 0;
+    ((Features*)(g_shared + FeaturesOffset))->reserved[4] = GetCurrentProcessId();
+    return true;
+}
+
+int g_runtimeSkin = -1; // skin the running MW2 was started with
+bool StartRuntime()
+{
+    if (g_child.hProcess)
+    {
+        if (WaitForSingleObject(g_child.hProcess, 0) == WAIT_TIMEOUT)
+            return true;
+        CloseHandle(g_child.hProcess);
+        CloseHandle(g_child.hThread);
+        g_child = {};
+    }
+    std::wstring root = Wide(g_cfg.runtimeDir), exe = root + L"\\" + Wide(g_cfg.runtimeExe);
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        g_runtimeError = "MW2 runtime not found";
+        Log("MW2 runtime not found: %s\\%s", g_cfg.runtimeDir.c_str(), g_cfg.runtimeExe.c_str());
+        return false;
+    }
+    SetEnvironmentVariableW(L"IW4L_GTA_BRIDGE", Wide(g_cfg.mappingName).c_str());
+    SetEnvironmentVariableW(L"WGPU_BACKEND", L"dx12");
+    SetEnvironmentVariableW(L"IW4L_PRESENT_MODE", L"AutoNoVsync");
+    SetEnvironmentVariableW(L"IW4L_SETTINGS_PATH", (root + L"\\" + Wide(g_cfg.settingsFile)).c_str());
+    SetEnvironmentVariableW(L"IW4L_PIPELINED_RENDERING", L"0");
+    SetEnvironmentVariableW(L"IW4L_SCRIPT_DVARS", L"set scr_dm_timelimit 0; set scr_dm_scorelimit 0; set scr_war_timelimit 0; set scr_war_scorelimit 0");
+    SetEnvironmentVariableW(L"IW4L_IMAGE_DECODE_BUDGET_MIB", L"128");
+    std::wstring command = L"\"" + exe + L"\" --cmds \"wait progression; unlock all; map " + Wide(kSkins[g_cfg.skin].map) +
+                           L"; wait world; spawn 0; force_match_start\" menu";
+    g_runtimeSkin = g_cfg.skin;
+    Log("MW2 skin: %s (map %s)", kSkins[g_cfg.skin].name, kSkins[g_cfg.skin].map);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    bool okay = CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                               root.c_str(), &startup, &g_child) != 0;
+    SetEnvironmentVariableW(L"IW4L_GTA_BRIDGE", nullptr);
+    if (okay)
+    {
+        g_runtimeStarted = GetTickCount();
+        g_unreadySince = 0;
+        g_runtimeWasReady = false;
+        g_runtimeError.clear();
+        g_guest = {};
+        g_lastShot = 0;
+        Lock lock(g_controlMutex);
+        if (lock.acquired)
+        {
+            ((Control*)g_shared)->guest = {};
+            ZeroMemory(g_shared + FeaturesOffset, MappingSize - FeaturesOffset);
+            ((Features*)(g_shared + FeaturesOffset))->reserved[4] = GetCurrentProcessId();
+        }
+        Log("Started MW2 runtime pid %lu", g_child.dwProcessId);
+    }
+    else
+    {
+        g_runtimeError = "MW2 start failed";
+        Log("MW2 runtime start failed (%lu)", GetLastError());
+    }
+    return okay;
+}
+
+void Restore();
+
+void WatchRuntime()
+{
+    if (!g_requested || !g_child.hProcess)
+        return;
+    DWORD code = 0;
+    if (GetExitCodeProcess(g_child.hProcess, &code) && code != STILL_ACTIVE)
+    {
+        g_runtimeError = "MW2 runtime stopped";
+        Log("MW2 runtime stopped (exit code %lu). F6 to retry", code);
+        g_requested = false;
+        Restore();
+        return;
+    }
+    DWORD now = GetTickCount();
+    if (g_guest.ready && now - g_guest.tick < 1500)
+    {
+        if (!g_runtimeWasReady)
+            Log("MW2 ready after %.1f s", (now - g_runtimeStarted) / 1000.f);
+        g_runtimeWasReady = true;
+        g_unreadySince = 0;
+        return;
+    }
+    if (!g_unreadySince)
+        g_unreadySince = now;
+    if (now - g_unreadySince < (g_runtimeWasReady ? 15000u : 180000u))
+        return;
+    g_runtimeError = g_runtimeWasReady ? "MW2 connection lost" : "MW2 startup timed out";
+    Log("%s. F6 to retry", g_runtimeError.c_str());
+    TerminateProcess(g_child.hProcess, 1);
+    g_requested = false;
+    Restore();
+}
+
+BOOL CALLBACK MoveGuestWindow(HWND window, LPARAM pid)
+{
+    DWORD owner = 0;
+    GetWindowThreadProcessId(window, &owner);
+    if (owner == (DWORD)pid && GetWindow(window, GW_OWNER) == nullptr)
+    {
+        RECT bounds{};
+        GetWindowRect(window, &bounds);
+        if (bounds.left > -9000)
+        {
+            SetWindowPos(window, HWND_BOTTOM, -10000, 0, 800, 600, SWP_NOACTIVATE | SWP_NOSIZE);
+            ShowWindow(window, SW_SHOWNOACTIVATE);
+        }
+        return FALSE;
+    }
+    return TRUE;
+}
+
+// ---------------------------------------------------------------- collision
+// Room collision: RE4's loaded SAT polygons (floors, slopes, walls) near the player, in host space.
+Triangle g_triangles[MaxTriangles];
+
+uint32_t GatherCollision(const Vec3& center)
+{
+    uint32_t n = 0;
+    const float r = g_cfg.collisionRadius * g_cfg.unitsPerMeter, rv = 6.f * g_cfg.unitsPerMeter;
+    __try
+    {
+        uint8_t* mgr = g_satMgr;
+        uint8_t* array = At<uint8_t*>(mgr, re4::Mgr_array);
+        uint32_t count = At<uint32_t>(mgr, re4::Mgr_count), stride = At<uint32_t>(mgr, re4::Mgr_stride);
+        if (!array || count > 4096 || stride < 0xC0 || stride > 0x1000)
+            return 0;
+        for (uint32_t s = 0; s < count && n < MaxTriangles; ++s)
+        {
+            uint8_t* sat = array + s * stride;
+            if ((At<uint32_t>(sat, re4::Unit_beFlag) & 0x201) != 1 || !(At<uint8_t>(sat, re4::Sat_flag) & 4))
+                continue;
+            auto* verts = At<Vec3*>(sat, re4::Sat_vert);
+            auto* polys = At<uint16_t(*)[10]>(sat, re4::Sat_poly);
+            uint32_t vertNum = At<uint16_t>(sat, re4::Sat_vertNum), polyNum = At<uint16_t>(sat, re4::Sat_polyNum);
+            const float* m = &At<float>(sat, re4::Sat_mat);
+            if (!verts || !polys)
+                continue;
+            for (uint32_t p = 0; p < polyNum && n < MaxTriangles; ++p)
+            {
+                Vec3 w[3];
+                bool bad = false;
+                for (int k = 0; k < 3; ++k)
+                {
+                    uint32_t i = polys[p][k];
+                    if (i >= vertNum) { bad = true; break; }
+                    const Vec3& v = verts[i];
+                    w[k] = { m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3],
+                             m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7],
+                             m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11] };
+                }
+                if (bad)
+                    continue;
+                float minX = std::min({ w[0].x, w[1].x, w[2].x }), maxX = std::max({ w[0].x, w[1].x, w[2].x });
+                float minY = std::min({ w[0].y, w[1].y, w[2].y }), maxY = std::max({ w[0].y, w[1].y, w[2].y });
+                float minZ = std::min({ w[0].z, w[1].z, w[2].z }), maxZ = std::max({ w[0].z, w[1].z, w[2].z });
+                if (minX > center.x + r || maxX < center.x - r || minZ > center.z + r || maxZ < center.z - r ||
+                    minY > center.y + rv || maxY < center.y - rv)
+                    continue;
+                Vec3 e1{ w[1].x - w[0].x, w[1].y - w[0].y, w[1].z - w[0].z }, e2{ w[2].x - w[0].x, w[2].y - w[0].y, w[2].z - w[0].z };
+                Vec3 c{ e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x };
+                if (c.x * c.x + c.y * c.y + c.z * c.z < 1.f) // degenerate (area below ~0.5 mm^2)
+                    continue;
+                Triangle& t = g_triangles[n++];
+                for (int k = 0; k < 3; ++k)
+                    ToHost(w[k], t.vertices[k]);
+                t.surface = 0; // static world, generic material
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log("collision read faulted; sending %u triangles", n);
+    }
+    return n;
+}
+
+void PublishCollision(uint8_t* pl)
+{
+    if (!g_sceneMutex || !g_satMgr || GetTickCount() - g_lastScene < 80)
+        return;
+    const Vec3 center = At<Vec3>(pl, re4::Coord_pos);
+    uint32_t n = GatherCollision(center);
+    g_lastScene = GetTickCount();
+    if (!n)
+        return;
+    Lock lock(g_sceneMutex);
+    if (!lock.acquired)
+        return;
+    auto* scene = (Scene*)(g_shared + SceneOffset);
+    memcpy(g_shared + TriangleOffset, g_triangles, n * sizeof(Triangle));
+    scene->count = n;
+    scene->tick = GetTickCount();
+    scene->overflow = n == MaxTriangles;
+    ToHost(center, scene->center);
+    scene->sequence = ++g_sceneSequence;
+    g_hostMovement.sceneSequence = g_sceneSequence;
+    if (n != g_sceneCount || (n == MaxTriangles) != g_sceneOverflow)
+    {
+        // Height range of what was sent versus Leon's feet, in metres: the floor should sit at his feet.
+        float lo = 1e9f, hi = -1e9f;
+        for (uint32_t i = 0; i < n; ++i)
+            for (int k = 0; k < 3; ++k)
+            {
+                lo = std::min(lo, g_triangles[i].vertices[k][2]);
+                hi = std::max(hi, g_triangles[i].vertices[k][2]);
+            }
+        Log("collision: %u triangles near Leon%s, heights %.2f..%.2f m, Leon's feet at %.2f m", n,
+            n == MaxTriangles ? " (limit reached)" : "", lo, hi, scene->center[2]);
+    }
+    g_sceneCount = n;
+    g_sceneOverflow = n == MaxTriangles;
+}
+
+// ---------------------------------------------------------------- activation
+bool Down(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+bool Focused()
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+void RestorePrompts();
+void Restore()
+{
+    if (!g_active)
+        return;
+    if (uint8_t* g = Global())
+    {
+        uint32_t& disp = At<uint32_t>(g, re4::G_dispFlags);
+        const uint32_t mine = re4::DPF_PL | re4::DPF_COCKPIT;
+        disp = (disp & ~mine) | (g_savedDisp & mine);
+    }
+    RestorePrompts();
+    g_active = false;
+    Log("MW2 control off; RE4 has Leon and the camera again");
+}
+
+void Activate(uint8_t* g, uint8_t* pl)
+{
+    // Start facing where Leon faces, looking level. RE4's camera is unreliable here: after a cutscene
+    // it can still be in front of Leon looking back at him.
+    float t = At<Vec3>(pl, re4::Coord_ang).y; // Leon looks along (sin t, 0, cos t); host is (x, -z, y)
+    g_yaw = std::atan2(-std::cos(t), std::sin(t)) * 180 / Pi;
+    g_pitch = 0;
+    if (!++g_hostMovement.epoch)
+        ++g_hostMovement.epoch;
+    ToHost(At<Vec3>(pl, re4::Coord_pos), g_hostMovement.foot);
+    g_lastScene = 0;
+    uint32_t& disp = At<uint32_t>(g, re4::G_dispFlags);
+    g_savedDisp = disp;
+    if (g_cfg.hidePlayer)
+        disp |= re4::DPF_PL;  // Leon hidden: first person
+    disp |= re4::DPF_COCKPIT; // RE4's HUD hidden: MW2's HUD and the health bar replace it
+    g_active = true;
+    Log("MW2 control on: epoch %u, Leon routine %u/%u/%u at (%.0f, %.0f, %.0f), yaw %.1f pitch %.1f, disp flags 0x%08X -> 0x%08X",
+        g_hostMovement.epoch, At<uint8_t>(pl, re4::Model_rno0), At<uint8_t>(pl, re4::Model_rno0 + 1),
+        At<uint8_t>(pl, re4::Model_rno0 + 2), At<Vec3>(pl, re4::Coord_pos).x, At<Vec3>(pl, re4::Coord_pos).y,
+        At<Vec3>(pl, re4::Coord_pos).z, g_yaw, g_pitch, g_savedDisp, disp);
+}
+
+// Why MW2 may not have control right now, or null when it may.
+// RE4 action (jump over a fence, jump down, climb a ladder, kick...): when E is pressed with RE4's action
+// prompt on screen, RE4 plays the action and moves Leon itself. MW2 steps aside until Leon's routine is
+// back to normal movement, then takes over again from where Leon landed.
+DWORD g_actionStart = 0;
+uint8_t g_actionRno[3] = {};
+bool g_actionSeenChange = false;
+const char* ActionBlocker(uint8_t* pl)
+{
+    if (!g_actionStart)
+        return nullptr;
+    DWORD age = GetTickCount() - g_actionStart;
+    const uint8_t* r = &At<uint8_t>(pl, re4::Model_rno0);
+    bool normal = r[0] == g_actionRno[0] && r[1] == g_actionRno[1];
+    if (!normal && !g_actionSeenChange)
+    {
+        g_actionSeenChange = true;
+        Log("RE4 action: Leon routine %u/%u/%u -> %u/%u/%u", g_actionRno[0], g_actionRno[1], g_actionRno[2], r[0], r[1], r[2]);
+    }
+    // no action started (a pickup or nothing): give control back quickly
+    if (!g_actionSeenChange && age > 500)
+    {
+        g_actionStart = 0;
+        return nullptr;
+    }
+    if (age < 300 || !normal)
+    {
+        if (age < 10000)
+            return "RE4 action (jump, climb...)";
+        Log("RE4 action: still not back to normal after 10 s, MW2 takes over");
+    }
+    else
+        Log("RE4 action done after %.1f s", age / 1000.f);
+    g_actionStart = 0;
+    return nullptr;
+}
+
+const char* Blocker(uint8_t* g, uint8_t* pl)
+{
+    if (!g_requested) return "off";
+    if (!(g_guest.ready && GetTickCount() - g_guest.tick < 1500)) return "MW2 loading";
+    if (!g || !pl) return "no player";
+    if (At<uint8_t>(g, re4::G_rno0) != 3) return "not in gameplay";
+    if (At<uint8_t>(g, re4::G_plType) != 0) return "not playing as Leon";
+    if (At<int16_t>(g, re4::G_plHp) <= 0) return "Leon is down";
+    if (At<uint8_t>(pl, re4::Model_rno0) >= 2) return "Leon is hurt or grabbed (RE4 handles it)";
+    if (At<uint32_t>(g, re4::G_statusFlags) & re4::STA_SUSPEND) return "cutscene, event or menu";
+    if (g_qteActive && *g_qteActive) return "quick-time event (RE4 handles it)";
+    if (const char* action = ActionBlocker(pl)) return action;
+    if (!g_active && g_frame - g_hitCheckFrame > 3) return "RE4 gameplay camera not active";
+    return nullptr;
+}
+
+// ---------------------------------------------------------------- MW2 shots -> RE4 hits
+Shot g_shotQueue[64];
+uint32_t g_pendingShots = 0;
+Explosion g_blastQueue[ExplosionCount];
+uint32_t g_pendingBlasts = 0, g_lastExplosion = 0;
+uint32_t g_hitsSent = 0, g_blastsSent = 0;
+
+const char* WeaponName(uint32_t weapon)
+{
+    for (auto& e : g_catalogAll)
+        if (e.weapon == weapon)
+            return e.name;
+    return "";
+}
+
+bool StartsWithAny(const char* name, std::initializer_list<const char*> prefixes)
+{
+    for (const char* x : prefixes)
+    {
+        size_t n = strlen(x);
+        if (!strncmp(name, x, n) && (name[n] == 0 || name[n] == ' '))
+            return true;
+    }
+    return false;
+}
+
+// The RE4 weapon whose damage and enemy reactions fit the MW2 weapon best. RE4 computes the damage.
+int Re4WeaponFor(const char* name, float rangeMetres)
+{
+    if (rangeMetres < 3.f)
+        return re4::WEP_KNIFE; // MW2 melee
+    if (StartsWithAny(name, { "deserteagle", "coltanaconda" }))
+        return re4::WEP_BROKEN_BUTTERFLY;
+    if (StartsWithAny(name, { "glock", "beretta393", "pp2000", "tmp", "mp5k", "ump45", "kriss", "p90", "uzi" }))
+        return re4::WEP_TMP;
+    if (StartsWithAny(name, { "ak47", "m4", "famas", "fal", "scar", "tavor", "fn2000", "masada", "m16", "aug", "rpd",
+                              "sa80", "mg4", "m240" }))
+        return g_cfg.rifleWeapon; // the Chicago Typewriter killed Ganados in one shot at MW2's fire rate
+    if (StartsWithAny(name, { "cheytac" }))
+        return re4::WEP_RIFLE_BOLT;
+    if (StartsWithAny(name, { "barrett", "wa2000", "m21" }))
+        return re4::WEP_RIFLE_SEMI;
+    if (StartsWithAny(name, { "striker", "aa12" }))
+        return re4::WEP_STRIKER;
+    if (StartsWithAny(name, { "spas12", "ranger", "model1887", "m1014" }))
+        return re4::WEP_SHOTGUN;
+    if (StartsWithAny(name, { "rpg", "at4", "m79" }))
+        return re4::WEP_RPG;
+    return re4::WEP_HANDGUN; // beretta, usp and anything unknown
+}
+
+int CallBulletHit(uint8_t* pl, Vec3 start, Vec3 end, int weapon)
+{
+    __try
+    {
+        return g_bulletHit(pl, &start, &end, weapon, 0, 6000.f);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log("BulletHit faulted (weapon 0x%02X)", weapon);
+        return -1;
+    }
+}
+
+// Enemies (EmMgr) with a body within radius of a point, for explosions.
+int EnemiesNear(uint8_t* pl, const Vec3& c, float radius, uint8_t** out, int max)
+{
+    int n = 0;
+    __try
+    {
+        uint8_t* array = At<uint8_t*>(g_emMgr, re4::Mgr_array);
+        uint32_t count = At<uint32_t>(g_emMgr, re4::Mgr_count), stride = At<uint32_t>(g_emMgr, re4::Mgr_stride);
+        for (uint32_t i = 0; array && i < count && i < 512 && n < max; ++i)
+        {
+            uint8_t* em = array + i * stride;
+            if (em == pl || (At<uint32_t>(em, re4::Unit_beFlag) & 0x601) == 0 || At<int16_t>(em, re4::Em_hp) <= 0)
+                continue;
+            const Vec3 p = At<Vec3>(em, re4::Coord_pos);
+            float dx = p.x - c.x, dy = p.y + 900.f - c.y, dz = p.z - c.z;
+            if (dx * dx + dy * dy + dz * dz < radius * radius)
+                out[n++] = em;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    return n;
+}
+
+int RE4Explosion(Vec3 pos, bool flash)
+{
+    uint8_t* g = Global();
+    __try
+    {
+        if (g_effect)
+            g_effect(0, -1, &pos, 0, 0, flash ? 0x0C : 0x0D, 0, 0, 0, 0);
+        if (g_sound)
+            g_sound(1, flash ? 0x13 : 0x14, &pos, 0, 0, 0);
+        if (g)
+            At<uint32_t>(g, re4::G_statusFlags) |= re4::STA_PL_FIRE;
+        int hits = 0;
+        if (g_bulletHit)
+        {
+            Vec3 p = pos;
+            if (flash)
+                p.y += 500.f;
+            hits = g_bulletHit(nullptr, &p, &p, flash ? re4::WEP_FLASH : re4::WEP_GRENADE, 0, flash ? 15000.f : 6000.f);
+        }
+        if (g)
+            At<uint32_t>(g, re4::G_statusFlags + 4) |= re4::STA1_EXPLOSION;
+        return hits;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log("RE4 explosion faulted");
+        return -1;
+    }
+}
+
+void ResolveShots(uint8_t* pl)
+{
+    uint32_t shots = g_pendingShots, blasts = g_pendingBlasts;
+    g_pendingShots = g_pendingBlasts = 0;
+    if (!g_active || !pl || !g_bulletHit)
+        return;
+    DWORD now = GetTickCount();
+    for (uint32_t i = 0; i < shots; ++i)
+    {
+        const Shot& sh = g_shotQueue[i];
+        if (now - sh.hostTick > 500 || !std::isfinite(sh.damage) || sh.damage <= 0)
+            continue;
+        float d[3] = { sh.direction[0], sh.direction[1], sh.direction[2] };
+        float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (!std::isfinite(len) || len < .5f || len > 1.5f)
+            continue;
+        float range = std::clamp(sh.range, 1.f, 100.f);
+        float endH[3] = { sh.origin[0] + d[0] / len * range, sh.origin[1] + d[1] / len * range, sh.origin[2] + d[2] / len * range };
+        const char* name = WeaponName(sh.weapon);
+        int weapon = Re4WeaponFor(name, sh.range);
+        int hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
+        ++g_hitsSent;
+        static uint32_t logged = 0;
+        if (logged < 40 || hits > 0)
+        {
+            ++logged;
+            Log("shot %u: MW2 %s -> RE4 weapon 0x%02X, range %.1f m, BulletHit returned %d", sh.sequence,
+                name[0] ? name : "?", weapon, range, hits);
+        }
+    }
+    for (uint32_t i = 0; i < blasts; ++i)
+    {
+        const Explosion& e = g_blastQueue[i];
+        const char* name = WeaponName(e.weapon);
+        bool flash = strstr(name, "flash") || strstr(name, "concussion") || e.kind == 2;
+        if (strstr(name, "smoke"))
+            continue;
+        // Exactly what RE4's own hand grenade / flash grenade does when it goes off: effect, sound, status flags,
+        // then the attack-hit routine in blast mode (no attacker, start == end, radius).
+        Vec3 c = ToRe4(e.origin);
+        int hits = RE4Explosion(c, flash);
+        ++g_blastsSent;
+        Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s, BulletHit returned %d", e.sequence,
+            name[0] ? name : "?", e.kind, e.radius, flash ? "flash grenade" : "hand grenade", hits);
+    }
+}
+
+// ---------------------------------------------------------------- RE4 captions
+// Captions ("Will you use the emblem?", item messages) are placed by MesSet. While MW2 has control the
+// caption layout is placed higher so MW2's gun does not cover it; its window (IDC_MSG_WINDOW) follows in
+// RaisePrompts. Action-button prompts (moved separately) and the inventory are left alone.
+using MesSetFn = bool(__fastcall*)(void* self, void* edx, uint32_t num, int px, int py, uint32_t attr, int wk,
+                                   uint8_t col, int font);
+MesSetFn g_mesSetOrig = nullptr;
+bool __fastcall MesSetHook(void* self, void* edx, uint32_t num, int px, int py, uint32_t attr, int wk, uint8_t col,
+                           int font)
+{
+    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f)
+    {
+        static int logged = 0;
+        if (logged < 20 && ++logged)
+            Log("caption %u (layout %d, slot %d) at (%d, %d) moved up %.0f", num, font, wk, px, py, g_cfg.messageRaise);
+        py -= (int)g_cfg.messageRaise;
+    }
+    return g_mesSetOrig(self, edx, num, px, py, attr, wk, col, font);
+}
+
+// ---------------------------------------------------------------- RE4 prompts
+// While MW2 has control, RE4's "press ... to" prompts (2D class IDC_ACT_BUTTON) move up the screen so MW2's
+// gun does not cover them. Only top-level units move; their children follow. Restored when MW2 lets go.
+struct PromptUnit { uint8_t* unit; float y; };
+std::vector<PromptUnit> g_movedPrompts;
+
+void RaisePrompts()
+{
+    if (!g_idSys)
+        return;
+    __try
+    {
+        int count = At<int32_t>(g_idSys, re4::IdSys_count);
+        uint8_t* units = At<uint8_t*>(g_idSys, re4::IdSys_units);
+        if (!units || count <= 0 || count > 4096)
+            return;
+        for (int i = 0; i < count; ++i)
+        {
+            uint8_t* u = units + i * re4::IdUnit_size;
+            uint8_t cls = At<uint8_t>(u, re4::IdUnit_class);
+            if ((cls != re4::IDC_ACT_BUTTON && cls != re4::IDC_MSG_WINDOW) || At<void*>(u, re4::IdUnit_parent))
+                continue;
+            float raise = cls == re4::IDC_MSG_WINDOW ? g_cfg.messageRaise : g_cfg.promptRaise;
+            float& y = At<Vec3>(u, re4::IdUnit_pos0).y;
+            bool known = false;
+            for (auto& m : g_movedPrompts)
+                if (m.unit == u)
+                {
+                    known = true;
+                    if (y != m.y + raise) // RE4 reset it: take the new base
+                        m.y = y;
+                    y = m.y + raise;
+                }
+            if (!known)
+            {
+                g_movedPrompts.push_back({ u, y });
+                if (cls == re4::IDC_MSG_WINDOW)
+                    Log("caption window unit %d at y %.0f moved up %.0f", i, y, raise);
+                y += raise;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+void RestorePrompts()
+{
+    __try
+    {
+        for (auto& m : g_movedPrompts)
+            At<Vec3>(m.unit, re4::IdUnit_pos0).y = m.y;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    g_movedPrompts.clear();
+}
+
+// ---------------------------------------------------------------- weapon menu
+// MW2 weapons that have no counterpart in RE4 stay out of the menu: throwing knife, lock-on launchers,
+// placed explosives, riot shield and tactical insertion. Killstreaks, UAV and airstrikes are already
+// excluded by the runtime. Guns, launchers and frag/flash/stun/smoke grenades stay.
+bool FitsRe4(const char* name)
+{
+    static const char* excluded[] = { "throwingknife", "throwing knife", "javelin", "stinger", "c4", "claymore",
+                                      "riotshield", "riot shield", "tacticalinsertion", "tactical insertion",
+                                      "flare", "scrambler", "portable radar" };
+    for (const char* x : excluded)
+    {
+        size_t n = strlen(x);
+        if (!strncmp(name, x, n) && (name[n] == 0 || name[n] == ' '))
+            return false;
+    }
+    return name[0] != 0;
+}
+
+bool Edge(int key)
+{
+    bool d = Down(key), result = d && !g_prevKeys[key];
+    g_prevKeys[key] = d;
+    return result;
+}
+
+void Notice(const std::string& text, DWORD ms = 3000)
+{
+    g_notice = text;
+    g_noticeUntil = GetTickCount() + ms;
+}
+
+// kind 1 = give/equip catalog weapon, 2 = refill ammo (MW2-GTA protocol)
+bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false)
+{
+    if (g_request && g_features.ack != g_request)
+    {
+        if (!silent)
+            Notice("Weapon request still pending");
+        return false;
+    }
+    if (!++g_request)
+        ++g_request;
+    g_requestKind = kind;
+    g_requestWeapon = weapon;
+    if (!silent)
+        Notice(kind == 2 ? "Refilling ammo..." : "Equipping...");
+    return true;
+}
+
+void SaveSetting(const char* key, const char* fmt, double value)
+{
+    char path[MAX_PATH], text[32];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    snprintf(text, sizeof(text), fmt, value);
+    WritePrivateProfileStringA("MW2RE4", key, text, path);
+}
+
+// Infinite ammo: MW2's own resupply, asked for whenever the reserve drops below one magazine
+// or a grenade slot is empty.
+void InfiniteAmmo()
+{
+    static DWORD last = 0;
+    DWORD now = GetTickCount();
+    if (!g_cfg.infiniteAmmo || !g_active || !g_guest.ready || now - last < 1500)
+        return;
+    bool low = g_guest.stock <= 0 || (g_guest.clip > 0 && g_guest.stock < g_guest.clip) ||
+               g_features.lethalAmmo == 0 || g_features.tacticalAmmo == 0;
+    if (low && Request(2, 0, true))
+        last = now;
+}
+
+void Restore();
+constexpr int kSettingsRows = 5;
+void SettingsInput(bool up, bool down, bool left, bool right, bool enter, bool back)
+{
+    if (up) g_settingsRow = (g_settingsRow + kSettingsRows - 1) % kSettingsRows;
+    if (down) g_settingsRow = (g_settingsRow + 1) % kSettingsRows;
+    if (back) g_settingsMenu = false;
+    int dir = right ? 1 : left ? -1 : 0;
+    switch (g_settingsRow)
+    {
+    case 0:
+        if (dir)
+        {
+            g_cfg.fov = std::clamp(g_cfg.fov + dir * 5.f, 60.f, 120.f);
+            SaveSetting("FOV", "%.0f", g_cfg.fov);
+        }
+        break;
+    case 1:
+        if (dir)
+        {
+            g_cfg.mouseScale = std::clamp(std::round((g_cfg.mouseScale + dir * .1f) * 10.f) / 10.f, .1f, 5.f);
+            SaveSetting("MouseScale", "%.1f", g_cfg.mouseScale);
+        }
+        break;
+    case 2:
+        if (dir || enter)
+        {
+            g_cfg.infiniteAmmo = !g_cfg.infiniteAmmo;
+            SaveSetting("InfiniteAmmo", "%.0f", g_cfg.infiniteAmmo);
+        }
+        break;
+    case 3:
+        if (dir)
+        {
+            g_cfg.skin = (g_cfg.skin + kSkinCount + dir) % kSkinCount;
+            SaveSetting("Skin", "%.0f", g_cfg.skin);
+        }
+        break;
+    case 4:
+        if (enter && g_child.hProcess && g_runtimeSkin != g_cfg.skin)
+        {
+            // MW2 loads the new map's soldiers: restart it. RE4 keeps running; MW2 mode returns when ready.
+            Log("restarting MW2 for skin %s", kSkins[g_cfg.skin].name);
+            Restore();
+            TerminateProcess(g_child.hProcess, 1);
+            WaitForSingleObject(g_child.hProcess, 3000);
+            g_settingsMenu = false;
+            g_runtimeWasReady = false;
+            g_unreadySince = 0;
+            g_runtimeError.clear();
+            g_guest = {};
+            if (!StartRuntime())
+                g_requested = false;
+            Notice("Restarting MW2 with the new skin...", 4000);
+        }
+        break;
+    }
+}
+
+std::string SettingsText()
+{
+    auto bar = [](float frac) {
+        std::string b = "[";
+        int n = (int)std::lround(std::clamp(frac, 0.f, 1.f) * 20);
+        for (int i = 0; i < 20; ++i)
+            b += i < n ? '|' : '.';
+        return b + "]";
+    };
+    char rows[kSettingsRows][160];
+    snprintf(rows[0], 160, "FIELD OF VIEW      %s  %.0f", bar((g_cfg.fov - 60.f) / 60.f).c_str(), g_cfg.fov);
+    snprintf(rows[1], 160, "MOUSE SENSITIVITY  %s  %.1f", bar((g_cfg.mouseScale - .1f) / 4.9f).c_str(), g_cfg.mouseScale);
+    snprintf(rows[2], 160, "INFINITE AMMO      %s", g_cfg.infiniteAmmo ? "ON" : "OFF");
+    snprintf(rows[3], 160, "SKIN               < %s >", kSkins[g_cfg.skin].name);
+    snprintf(rows[4], 160, "%s", g_runtimeSkin == g_cfg.skin || !g_child.hProcess
+                                     ? "RESTART MW2          (not needed)"
+                                     : "RESTART MW2 NOW      Enter: applies the new skin (MW2 loads again)");
+    std::string t = "MW2 SETTINGS   Up/Down select   Left/Right change   F10 close\n\n";
+    for (int i = 0; i < kSettingsRows; ++i)
+    {
+        t += i == g_settingsRow ? "> " : "   ";
+        t += rows[i];
+        t += "\n";
+    }
+    return t;
+}
+
+void WeaponMenuInput(bool focused)
+{
+    bool f8 = Edge(VK_F8), f9 = Edge(VK_F9), up = Edge(VK_UP), down = Edge(VK_DOWN), left = Edge(VK_LEFT),
+         right = Edge(VK_RIGHT), enter = Edge(VK_RETURN), esc = Edge(VK_BACK), f10 = Edge(VK_F10);
+    InfiniteAmmo();
+    if (!g_active || !focused)
+    {
+        g_weaponMenu = false;
+        g_settingsMenu = false;
+        return;
+    }
+    if (f10)
+    {
+        g_settingsMenu = !g_settingsMenu;
+        g_weaponMenu = false;
+    }
+    if (g_settingsMenu)
+    {
+        SettingsInput(up, down, left, right, enter, esc);
+        f8 = false;
+        up = down = left = right = enter = esc = false;
+    }
+    if (f8)
+    {
+        g_weaponMenu = !g_weaponMenu && !g_catalog.empty();
+        if (g_catalog.empty())
+            Notice("MW2 weapon list not received yet");
+        g_selected = std::min(g_selected, g_catalog.empty() ? size_t(0) : g_catalog.size() - 1);
+    }
+    if (f9)
+        Request(2);
+    if (g_weaponMenu && !g_catalog.empty())
+    {
+        size_t n = g_catalog.size();
+        if (up) g_selected = (g_selected + n - 1) % n;
+        if (down) g_selected = (g_selected + 1) % n;
+        if (left) g_selected = g_selected >= 12 ? g_selected - 12 : 0;
+        if (right) g_selected = std::min(g_selected + 12, n - 1);
+        if (esc) g_weaponMenu = false;
+        if (enter)
+        {
+            Request(1, g_catalog[g_selected].weapon);
+            g_weaponMenu = false;
+        }
+    }
+    if (g_request && g_features.ack == g_request && g_noticeUntil &&
+        (g_notice == "Equipping..." || g_notice == "Refilling ammo..."))
+    {
+        bool ok = g_features.outcome == 1;
+        Notice(ok ? (g_requestKind == 2 ? "Ammo refilled - R to reload" : "Weapon equipped") : "MW2 refused the request");
+        Log("weapon request %u kind %u weapon %u -> outcome %u", g_request, g_requestKind, g_requestWeapon, g_features.outcome);
+    }
+}
+
+std::string WeaponMenuText()
+{
+    std::string t = "WEAPONS   Up/Down select   Left/Right page   Enter equip   F8 close\n\n";
+    size_t first = g_selected / 12 * 12;
+    for (size_t i = first; i < std::min(first + 12, g_catalog.size()); ++i)
+    {
+        t += i == g_selected ? "> " : "   ";
+        std::string name = g_catalog[i].name;
+        for (auto& c : name)
+            c = (char)toupper((unsigned char)c);
+        t += name;
+        t += "\n";
+    }
+    char page[64];
+    snprintf(page, sizeof(page), "\npage %zu / %zu   (%zu weapons)", first / 12 + 1, (g_catalog.size() + 11) / 12,
+             g_catalog.size());
+    return t + page;
+}
+
+// ---------------------------------------------------------------- damage trace (research)
+// Hardware watchpoints on the two Ganados nearest Leon: their pending-hit flag and their HP. When RE4
+// writes either, the writer's address and its callers are logged. Used once, in RE4 mode, to find the
+// exact code Leon's own weapons use to damage enemies, so MW2's shots can go through the same path.
+DWORD g_mainThreadId = 0;
+uint8_t* g_traceEms[2] = {};
+volatile LONG g_traceWanted = 0; // 1 = helper thread should (re)arm the debug registers
+uint32_t g_traceSeen[96];
+volatile LONG g_traceSeenCount = 0;
+
+bool InText(uint32_t a) { return a >= (uint32_t)g_textBegin && a < (uint32_t)g_textEnd; }
+
+LONG CALLBACK TraceHandler(EXCEPTION_POINTERS* ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+        return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = ep->ContextRecord;
+    DWORD hit = c->Dr6 & 0xF;
+    if (!hit)
+        return EXCEPTION_CONTINUE_SEARCH;
+    c->Dr6 = 0;
+    uint32_t eip = c->Eip;
+    LONG n = g_traceSeenCount;
+    for (LONG i = 0; i < n; ++i)
+        if (g_traceSeen[i] == eip)
+            return EXCEPTION_CONTINUE_EXECUTION;
+    if (n < 96)
+    {
+        g_traceSeen[n] = eip;
+        g_traceSeenCount = n + 1;
+        uint32_t calls[8] = {};
+        int k = 0;
+        __try
+        {
+            uint32_t* sp = (uint32_t*)c->Esp;
+            for (int i = 0; i < 160 && k < 8; ++i)
+                if (InText(sp[i]) && ((uint8_t*)sp[i])[-5] == 0xE8)
+                    calls[k++] = sp[i];
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        uint8_t* base = (uint8_t*)GetModuleHandleA(nullptr);
+        int slot = hit & 1 ? 0 : hit & 2 ? 1 : hit & 4 ? 2 : 3;
+        const char* what[4] = { "Ganado A hit flag", "Ganado A HP", "Ganado B hit flag", "Ganado B HP" };
+        Log("TRACE %s written by bio4+0x%X (exe VA 0x%X) eax=%08X ebx=%08X ecx=%08X edx=%08X esi=%08X edi=%08X "
+            "callers: %X %X %X %X %X %X %X %X",
+            what[slot], eip - (uint32_t)base, eip - (uint32_t)base + 0x400000, c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi,
+            c->Edi, calls[0] ? calls[0] - (uint32_t)base + 0x400000 : 0, calls[1] ? calls[1] - (uint32_t)base + 0x400000 : 0,
+            calls[2] ? calls[2] - (uint32_t)base + 0x400000 : 0, calls[3] ? calls[3] - (uint32_t)base + 0x400000 : 0,
+            calls[4] ? calls[4] - (uint32_t)base + 0x400000 : 0, calls[5] ? calls[5] - (uint32_t)base + 0x400000 : 0,
+            calls[6] ? calls[6] - (uint32_t)base + 0x400000 : 0, calls[7] ? calls[7] - (uint32_t)base + 0x400000 : 0);
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+DWORD WINAPI TraceArmer(void*)
+{
+    for (;;)
+    {
+        Sleep(100);
+        if (!InterlockedExchange(&g_traceWanted, 0) || !g_mainThreadId)
+            continue;
+        HANDLE t = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, g_mainThreadId);
+        if (!t)
+            continue;
+        SuspendThread(t);
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(t, &c))
+        {
+            uintptr_t regs[4] = {};
+            DWORD dr7 = 0;
+            for (int e = 0; e < 2; ++e)
+            {
+                if (!g_traceEms[e])
+                    continue;
+                regs[e * 2] = (uintptr_t)(g_traceEms[e] + re4::Em_dmgFlag);   // 1 byte, write
+                regs[e * 2 + 1] = (uintptr_t)(g_traceEms[e] + re4::Em_hp);    // 2 bytes, write
+                int a = e * 2, b = e * 2 + 1;
+                dr7 |= (1u << (a * 2)) | (1u << (b * 2));
+                dr7 |= (1u << (16 + a * 4)) | (0u << (18 + a * 4));   // write, len 1
+                dr7 |= (1u << (16 + b * 4)) | (1u << (18 + b * 4));   // write, len 2
+            }
+            c.Dr0 = regs[0]; c.Dr1 = regs[1]; c.Dr2 = regs[2]; c.Dr3 = regs[3]; c.Dr7 = dr7;
+            SetThreadContext(t, &c);
+        }
+        ResumeThread(t);
+        CloseHandle(t);
+    }
+}
+
+void UpdateTrace(uint8_t* pl)
+{
+    static DWORD last = 0;
+    if (!g_cfg.damageTrace || !g_emMgr || !pl || GetTickCount() - last < 500)
+        return;
+    last = GetTickCount();
+    g_mainThreadId = GetCurrentThreadId();
+    uint8_t* best[2] = {};
+    float bestD[2] = { 1e30f, 1e30f };
+    __try
+    {
+        uint8_t* array = At<uint8_t*>(g_emMgr, re4::Mgr_array);
+        uint32_t count = At<uint32_t>(g_emMgr, re4::Mgr_count), stride = At<uint32_t>(g_emMgr, re4::Mgr_stride);
+        const Vec3 lp = At<Vec3>(pl, re4::Coord_pos);
+        for (uint32_t i = 0; array && i < count && i < 512; ++i)
+        {
+            uint8_t* em = array + i * stride;
+            if (em == pl || (At<uint32_t>(em, re4::Unit_beFlag) & 0x601) == 0 || At<int16_t>(em, re4::Em_hp) <= 0)
+                continue;
+            const Vec3 p = At<Vec3>(em, re4::Coord_pos);
+            float d = (p.x - lp.x) * (p.x - lp.x) + (p.z - lp.z) * (p.z - lp.z);
+            if (d > 15000.f * 15000.f)
+                continue;
+            if (d < bestD[0]) { best[1] = best[0]; bestD[1] = bestD[0]; best[0] = em; bestD[0] = d; }
+            else if (d < bestD[1]) { best[1] = em; bestD[1] = d; }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return;
+    }
+    if (best[0] != g_traceEms[0] || best[1] != g_traceEms[1])
+    {
+        g_traceEms[0] = best[0];
+        g_traceEms[1] = best[1];
+        for (int e = 0; e < 2; ++e)
+            if (best[e])
+                Log("TRACE watching Ganado %c: %p type %u hp %d at %.1f m", 'A' + e, (void*)best[e],
+                    At<uint8_t>(best[e], re4::Model_id), At<int16_t>(best[e], re4::Em_hp), std::sqrt(bestD[e]) / 1000.f);
+        g_traceWanted = 1;
+    }
+}
+
+// ---------------------------------------------------------------- per-frame exchange
+void Exchange(uint8_t* g, uint8_t* pl)
+{
+    if (!g_shared)
+        return;
+    if (g_requested && pl)
+        PublishCollision(pl);
+    Lock lock(g_controlMutex);
+    if (!lock.acquired)
+        return;
+    auto* c = (Control*)g_shared;
+    g_guest = c->guest;
+    g_guestMovement = c->guestMovement;
+    g_guestCamera = *(GuestCamera*)(g_shared + CameraOffset);
+    auto* feature = (Features*)(g_shared + FeaturesOffset);
+    g_features = *feature;
+    uint32_t catalogSize = std::min(feature->catalogCount, CatalogCount);
+    if (catalogSize && catalogSize != g_catalogSource)
+    {
+        auto* first = (CatalogEntry*)(g_shared + CatalogOffset);
+        g_catalog.clear();
+        g_catalogAll.assign(first, first + catalogSize);
+        for (auto& e : g_catalogAll)
+            e.name[55] = 0;
+        for (uint32_t i = 0; i < catalogSize; ++i)
+        {
+            CatalogEntry e = first[i];
+            e.name[55] = 0;
+            if (FitsRe4(e.name))
+                g_catalog.push_back(e);
+        }
+        g_catalogSource = catalogSize;
+        Log("weapon menu: %zu of %u MW2 weapons fit RE4", g_catalog.size(), catalogSize);
+    }
+    feature->request = g_request;
+    feature->kind = g_requestKind;
+    feature->weapon = g_requestWeapon;
+    // MW2's accepted shots and explosions, resolved in RE4 after the lock (ResolveShots).
+    uint32_t available = g_guest.shots - g_lastShot;
+    if (available > ShotCount)
+    {
+        g_lastShot = g_guest.shots - ShotCount;
+        available = ShotCount;
+    }
+    while (available--)
+    {
+        ++g_lastShot;
+        const auto& sh = c->shots[g_lastShot % ShotCount];
+        if (sh.sequence == g_lastShot && g_pendingShots < 64)
+            g_shotQueue[g_pendingShots++] = sh;
+    }
+    uint32_t blasts = feature->explosions - g_lastExplosion;
+    if (blasts > ExplosionCount)
+    {
+        g_lastExplosion = feature->explosions - ExplosionCount;
+        blasts = ExplosionCount;
+    }
+    while (blasts--)
+    {
+        ++g_lastExplosion;
+        const auto& e = ((Explosion*)(g_shared + ExplosionsOffset))[g_lastExplosion % ExplosionCount];
+        if (e.sequence == g_lastExplosion && g_pendingBlasts < ExplosionCount)
+            g_blastQueue[g_pendingBlasts++] = e;
+    }
+
+    DWORD now = GetTickCount();
+    g_host.tick = now;
+    g_host.enabled = g_active && !MenuOpen() ? 1 : 0;
+    g_host.yaw = g_yaw;
+    g_host.pitch = g_pitch;
+    g_host.fov = g_cfg.fov;
+    g_host.dt = std::clamp((now - g_lastTime) / 1000.f, 0.001f, 0.1f);
+    g_lastTime = now;
+    if (g && pl)
+    {
+        int hpMax = std::max<int>(1, At<int16_t>(g, re4::G_plHpMax));
+        g_host.health = 100.f * std::max<int>(0, At<int16_t>(g, re4::G_plHp)) / hpMax;
+        float foot[3];
+        ToHost(At<Vec3>(pl, re4::Coord_pos), foot);
+        g_host.eye[0] = foot[0];
+        g_host.eye[1] = foot[1];
+        g_host.eye[2] = foot[2] + 1.6f;
+    }
+    g_host.velocity[0] = g_host.velocity[1] = g_host.velocity[2] = 0;
+    g_host.buttons = 0;
+    if (g_active && !MenuOpen() && Focused())
+    {
+        if (Down(VK_LBUTTON)) g_host.buttons |= 1;
+        if (Down(VK_RBUTTON)) g_host.buttons |= 2;
+        if (Down('R')) g_host.buttons |= 4;
+        if (Down('2')) g_host.buttons |= 8;
+        if (Down('1')) g_host.buttons |= 65536;
+        if (Down('W')) g_host.buttons |= 16;
+        if (Down('S')) g_host.buttons |= 32;
+        if (Down('A')) g_host.buttons |= 64;
+        if (Down('D')) g_host.buttons |= 128;
+        if (Down(VK_SHIFT)) g_host.buttons |= 256;
+        if (Down(VK_SPACE)) g_host.buttons |= 512;
+        if (Down('C')) g_host.buttons |= 1024;
+        if (Down(VK_CONTROL)) g_host.buttons |= 2048;
+        if (Down('G')) g_host.buttons |= 4096;
+        if (Down('H')) g_host.buttons |= 8192;
+        if (Down('V')) g_host.buttons |= 16384;
+        if (Down('E')) g_host.buttons |= 32768;
+        g_mouseTotalX += g_mousePendingX * g_cfg.mouseScale;
+        g_mouseTotalY -= g_mousePendingY * g_cfg.mouseScale * (g_cfg.invertMouseY ? -1.f : 1.f);
+    }
+    g_mousePendingX = g_mousePendingY = 0;
+    g_hostMovement.tick = now;
+    g_hostMovement.flags = g_active ? 1 : 0;
+    memcpy(&g_hostMovement.reserved[0], &g_mouseTotalX, sizeof(float));
+    memcpy(&g_hostMovement.reserved[1], &g_mouseTotalY, sizeof(float));
+    g_hostMovement.reserved[2] = 0;
+    c->host = g_host;
+    c->hostMovement = g_hostMovement;
+    c->lock = {};
+}
+
+// Leon follows MW2's predicted player: position and facing. His own logic is stopped meanwhile.
+void ApplyMovement(uint8_t* pl)
+{
+    if (!g_active || g_guestMovement.epoch != g_hostMovement.epoch || !g_guestMovement.sequence)
+        return;
+    const float* f = g_guestMovement.foot;
+    if (!std::isfinite(f[0]) || !std::isfinite(f[1]) || !std::isfinite(f[2]))
+        return;
+    At<Vec3>(pl, re4::Coord_pos) = ToRe4(f);
+    if (g_guestCamera.epoch == g_hostMovement.epoch && g_guestCamera.sequence)
+    {
+        Vec3 d = DirToRe4(g_guestCamera.forward);
+        if (d.x * d.x + d.z * d.z > 1e-6f)
+            At<Vec3>(pl, re4::Coord_ang).y = std::atan2(d.x, d.z);
+    }
+}
+
+// RE4's camera shows exactly MW2's camera: no smoothing, no shoulder offset.
+void ApplyCamera(uint8_t* camera)
+{
+    if (!g_active || g_guestCamera.epoch != g_hostMovement.epoch || !g_guestCamera.sequence)
+        return;
+    const auto& gc = g_guestCamera;
+    for (float v : gc.eye) if (!std::isfinite(v)) return;
+    for (float v : gc.forward) if (!std::isfinite(v)) return;
+    auto& cp = At<CameraPoint>(camera, re4::Camera_point);
+    Vec3 eye = ToRe4(gc.eye), dir = DirToRe4(gc.forward);
+    cp.campos = eye;
+    cp.target = { eye.x + dir.x * 1000.f, eye.y + dir.y * 1000.f, eye.z + dir.z * 1000.f };
+    cp.roll = 0.f;
+    // MW2 reports a horizontal FOV for its own image aspect; RE4 takes a vertical one.
+    uint32_t w = 16, h = 9;
+    {
+        auto* frame = (Frame*)(g_shared + FrameOffset);
+        if (frame->width && frame->height) { w = frame->width; h = frame->height; }
+    }
+    float hfov = std::clamp(gc.fov, 20.f, 150.f) * Pi / 180;
+    cp.fovy = 2 * std::atan(std::tan(hfov / 2) * h / w) * 180 / Pi;
+}
+
+// ---------------------------------------------------------------- game hooks
+using HitCheckFn = void(__fastcall*)(void*, void*, float*, void*, CameraPoint*);
+HitCheckFn g_hitCheckOrig = nullptr;
+void __fastcall HitCheckHook(void* self, void* edx, float* plMat, void* offset, CameraPoint* aim)
+{
+    g_hitCheckOrig(self, edx, plMat, offset, aim);
+    g_hitCheckFrame = g_frame;
+}
+
+DWORD g_lastStatus = 0;
+void Status(uint8_t* g, uint8_t* pl, const char* blocker)
+{
+    DWORD now = GetTickCount();
+    if (now - g_lastStatus < 1000)
+        return;
+    g_lastStatus = now;
+    if (g_child.hProcess)
+    {
+        WatchRuntime();
+        EnumWindows(MoveGuestWindow, g_child.dwProcessId);
+    }
+    if (!g_requested && !g_active)
+        return;
+    Vec3 pos{};
+    if (pl)
+        pos = At<Vec3>(pl, re4::Coord_pos);
+    auto* frame = (Frame*)(g_shared + FrameOffset);
+    Log("status: %s | guest ready=%u frame=%u %ux%u | movement seq=%u age=%lums grounded=%u | camera seq=%u | "
+        "triangles=%u | room=r%03X Leon=(%.0f, %.0f, %.0f) | mouse total=(%.0f, %.0f) | shots to RE4=%u blasts=%u",
+        blocker ? blocker : "MW2 ACTIVE", g_guest.ready, frame->sequence, frame->width, frame->height,
+        g_guestMovement.sequence, now - g_guestMovement.tick, g_guestMovement.grounded, g_guestCamera.sequence,
+        g_sceneCount, g ? At<uint16_t>(g, re4::G_curRoomId) : 0, pos.x, pos.y, pos.z, g_mouseTotalX, g_mouseTotalY,
+        g_hitsSent, g_blastsSent);
+}
+
+// RE4 input while MW2 has control: Leon's own logic keeps running (damage, grabs, doors, items),
+// but only RE4's action/menu buttons reach him; movement, aim, fire and knife are MW2's.
+using PadReadFn = void(__cdecl*)();
+PadReadFn g_padReadOrig = nullptr;
+bool g_useWasDown = false;
+void __cdecl PadReadHook()
+{
+    g_padReadOrig();
+    if (!g_active || !g_keyOn || !g_keyTrg)
+        return;
+    // RE4's mouse deltas share their address with Joy[0]'s left stick: read them before zeroing it.
+    if (g_mouseX && g_mouseY)
+    {
+        g_mousePendingX += (float)*g_mouseX;
+        g_mousePendingY += (float)*g_mouseY;
+    }
+    uint64_t allowed = MenuOpen() ? 0 : re4::KEY_ALLOWED; // the menu owns arrows/Enter
+    *g_keyOn &= allowed;
+    *g_keyTrg &= allowed;
+    bool use = Focused() && Down('E');
+    if (use)
+    {
+        *g_keyOn |= re4::KEY_USE;
+        if (!g_useWasDown)
+        {
+            *g_keyTrg |= re4::KEY_USE;
+            uint8_t* pl = Player();
+            if (pl && g_actBtnActive && *g_actBtnActive && !g_actionStart)
+            {
+                g_actionStart = GetTickCount();
+                g_actionSeenChange = false;
+                memcpy(g_actionRno, &At<uint8_t>(pl, re4::Model_rno0), 3);
+            }
+        }
+    }
+    g_useWasDown = use;
+    if (g_joy)
+    {
+        At<int32_t>(g_joy, re4::Joy_leftX) = At<int32_t>(g_joy, re4::Joy_leftY) = 0;
+        At<int32_t>(g_joy, re4::Joy_pcLeftX) = At<int32_t>(g_joy, re4::Joy_pcLeftY) = 0;
+    }
+}
+
+// Runs once per frame inside CameraControl::move, right before RE4 builds its view matrices.
+using CameraSetFn = void(__cdecl*)(uint8_t* camera);
+CameraSetFn g_cameraSetOrig = nullptr;
+void __cdecl CameraSetHook(uint8_t* camera)
+{
+    ++g_frame;
+    uint8_t* g = Global();
+    uint8_t* pl = Player();
+    bool focused = Focused();
+    bool key = focused && Down(g_cfg.toggleKey);
+    if (key && !g_keyWasDown)
+    {
+        g_requested = !g_requested;
+        if (g_requested && !StartRuntime())
+            g_requested = false;
+        Log(g_requested ? "F6: MW2 requested" : "F6: MW2 off");
+        if (!g_requested)
+            Restore();
+    }
+    g_keyWasDown = key;
+    bool helpKey = focused && Down(VK_F7);
+    if (helpKey && !g_helpKeyWasDown)
+    {
+        g_cfg.showControls = !g_cfg.showControls;
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+        WritePrivateProfileStringA("MW2RE4", "ShowControls", g_cfg.showControls ? "1" : "0", path);
+    }
+    g_helpKeyWasDown = helpKey;
+    WeaponMenuInput(focused);
+    if (!g_active)
+        UpdateTrace(pl);
+
+    const char* blocker = Blocker(g, pl);
+    if (blocker && g_active)
+    {
+        Log("MW2 suspended: %s", blocker);
+        Restore();
+    }
+    else if (!blocker && !g_active)
+        Activate(g, pl);
+
+    Exchange(g, pl);
+    g_lastTick = GetTickCount();
+    if (g_active && g)
+    {
+        // scripts can reset display flags; keep Leon and RE4's HUD hidden while MW2 has control
+        uint32_t& disp = At<uint32_t>(g, re4::G_dispFlags);
+        if (g_cfg.hidePlayer)
+            disp |= re4::DPF_PL;
+        disp |= re4::DPF_COCKPIT;
+    }
+    if (g && pl)
+    {
+        int hp = At<int16_t>(g, re4::G_plHp);
+        if (g_lastHp >= 0 && hp < g_lastHp && g_active)
+        {
+            int hpMax = std::max<int>(1, At<int16_t>(g, re4::G_plHpMax));
+            g_damageUntil = GetTickCount() + 850;
+            g_damageStrength = std::clamp((g_lastHp - hp) * 4.f / hpMax, .35f, 1.f);
+            Log("Leon hurt: %d -> %d of %d", g_lastHp, hp, hpMax);
+        }
+        g_lastHp = hp;
+    }
+    ResolveShots(pl);
+    if (g_active)
+        RaisePrompts();
+    if (g_active && pl)
+    {
+        ApplyMovement(pl);
+        ApplyCamera(camera);
+    }
+    Status(g, pl, blocker);
+    g_cameraSetOrig(camera);
+}
+
+// ---------------------------------------------------------------- overlay (D3D9)
+IDirect3DTexture9* g_texture = nullptr;
+IDirect3DPixelShader9* g_chroma = nullptr;
+IDirect3DDevice9* g_chromaDevice = nullptr;
+std::vector<uint8_t> g_pixels;
+uint32_t g_imageW = 0, g_imageH = 0, g_lastFrame = 0;
+bool g_drawnThisPresent = false;
+
+void ReleaseTexture()
+{
+    if (g_texture) { g_texture->Release(); g_texture = nullptr; }
+    g_lastFrame = 0;
+}
+
+void CreateChromaShader(IDirect3DDevice9* device)
+{
+    if (g_chromaDevice == device)
+        return;
+    g_chromaDevice = device;
+    using CompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
+                                       UINT, UINT, ID3DBlob**, ID3DBlob**);
+    static HMODULE compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+    auto compile = compiler ? (CompileFn)GetProcAddress(compiler, "D3DCompile") : nullptr;
+    if (!compile)
+    {
+        Log("Chroma shader compiler unavailable; using CPU fallback");
+        return;
+    }
+    // MW2 draws its weapon and HUD over magenta; this turns magenta into transparency (from MW2-GTA).
+    const char* source = R"(
+ sampler2D image : register(s0);
+ float4 main(float2 uv:TEXCOORD0,float4 tint:COLOR0):COLOR0 {
+   float3 rgb=tex2D(image,uv).rgb;
+   float matte=max(0,min(rgb.r,rgb.b)-rgb.g);
+   float alpha=1-matte;
+   float3 foreground=saturate((rgb-float3(matte,0,matte))/max(alpha,0.00392157));
+   return float4(foreground,alpha)*tint;
+ }
+ )";
+    ID3DBlob* code = nullptr;
+    ID3DBlob* errors = nullptr;
+    HRESULT hr = compile(source, strlen(source), "MW2RE4Chroma", nullptr, nullptr, "main", "ps_3_0",
+                         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &errors);
+    if (SUCCEEDED(hr) && code)
+        hr = device->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &g_chroma);
+    if (errors) { Log("%s", (const char*)errors->GetBufferPointer()); errors->Release(); }
+    if (code) code->Release();
+    Log(SUCCEEDED(hr) ? "GPU chroma shader ready" : "GPU chroma shader failed; using CPU fallback");
+}
+
+void CpuChroma(uint8_t* target, const uint8_t* source, uint32_t width)
+{
+    for (uint32_t x = 0; x < width; x++)
+    {
+        auto* p = source + x * 4;
+        auto* q = target + x * 4;
+        unsigned matte = std::min(p[0], p[2]) > p[1] ? std::min(p[0], p[2]) - p[1] : 0;
+        unsigned alpha = 255 - matte;
+        q[3] = (uint8_t)alpha;
+        for (int ch = 0; ch < 3; ch++)
+        {
+            unsigned contribution = ch == 1 ? p[ch] : (p[ch] > matte ? p[ch] - matte : 0);
+            q[ch] = alpha ? (uint8_t)std::min(255u, (contribution * 255 + alpha / 2) / alpha) : 0;
+        }
+    }
+}
+
+struct Vertex { float x, y, z, rhw; DWORD color; float u, v; };
+void Quad(IDirect3DDevice9* device, float x, float y, float w, float h, DWORD color, IDirect3DTexture9* tex = nullptr)
+{
+    Vertex v[4] = { { x - .5f, y - .5f, 0, 1, color, 0, 0 }, { x + w - .5f, y - .5f, 0, 1, color, 1, 0 },
+                    { x - .5f, y + h - .5f, 0, 1, color, 0, 1 }, { x + w - .5f, y + h - .5f, 0, 1, color, 1, 1 } };
+    device->SetTexture(0, tex);
+    device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+    device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(Vertex));
+}
+
+// Text drawn with GDI into a texture once, then reused until the text or size changes.
+// White glyphs, alpha from coverage; the colour comes from the quad's vertex colour.
+struct TextTexture
+{
+    std::string text;
+    int pixelHeight = 0;
+    IDirect3DTexture9* texture = nullptr;
+    UINT width = 0, height = 0;
+};
+TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText;
+
+void ReleaseText(TextTexture& t)
+{
+    if (t.texture) { t.texture->Release(); t.texture = nullptr; }
+    t.text.clear();
+}
+
+bool UpdateText(IDirect3DDevice9* device, TextTexture& t, const std::string& text, int pixelHeight)
+{
+    if (t.texture && t.text == text && t.pixelHeight == pixelHeight)
+        return true;
+    ReleaseText(t);
+    HDC dc = CreateCompatibleDC(nullptr);
+    HFONT font = CreateFontA(-pixelHeight, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, "Segoe UI");
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    std::vector<std::string> lines;
+    for (size_t start = 0;;)
+    {
+        size_t end = text.find('\n', start);
+        lines.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    int lineH = pixelHeight * 5 / 4, w = 1;
+    for (auto& l : lines)
+    {
+        SIZE sz{};
+        GetTextExtentPoint32A(dc, l.c_str(), (int)l.size(), &sz);
+        w = std::max(w, (int)sz.cx);
+    }
+    int h = lineH * (int)lines.size();
+    w += 4;
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    bool ok = false;
+    if (bmp && bits)
+    {
+        HGDIOBJ oldBmp = SelectObject(dc, bmp);
+        memset(bits, 0, (size_t)w * h * 4);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        for (size_t i = 0; i < lines.size(); ++i)
+            TextOutA(dc, 2, (int)i * lineH, lines[i].c_str(), (int)lines[i].size());
+        GdiFlush();
+        if (SUCCEEDED(device->CreateTexture(w, h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t.texture, nullptr)))
+        {
+            D3DLOCKED_RECT rect{};
+            if (SUCCEEDED(t.texture->LockRect(0, &rect, nullptr, 0)))
+            {
+                for (int y = 0; y < h; ++y)
+                {
+                    auto* src = (uint8_t*)bits + (size_t)y * w * 4;
+                    auto* dst = (uint8_t*)rect.pBits + (size_t)y * rect.Pitch;
+                    for (int x = 0; x < w; ++x)
+                    {
+                        uint8_t a = std::max({ src[x * 4], src[x * 4 + 1], src[x * 4 + 2] });
+                        dst[x * 4] = dst[x * 4 + 1] = dst[x * 4 + 2] = 255;
+                        dst[x * 4 + 3] = a;
+                    }
+                }
+                t.texture->UnlockRect(0);
+                ok = true;
+            }
+        }
+        SelectObject(dc, oldBmp);
+        DeleteObject(bmp);
+    }
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+    DeleteDC(dc);
+    if (!ok) { ReleaseText(t); return false; }
+    t.text = text;
+    t.pixelHeight = pixelHeight;
+    t.width = w;
+    t.height = h;
+    return true;
+}
+
+// Panel with a dark background and the text on top, with a 1-pixel shadow for legibility.
+void DrawPanel(IDirect3DDevice9* device, TextTexture& t, float x, float y, DWORD color)
+{
+    float pad = t.pixelHeight * .5f;
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+    Quad(device, x - pad, y - pad, t.width + 2 * pad, t.height + 2 * pad, 0xa0101010);
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    Quad(device, x + 1, y + 1, (float)t.width, (float)t.height, 0xff000000, t.texture);
+    Quad(device, x, y, (float)t.width, (float)t.height, color, t.texture);
+}
+
+const char* kHelp =
+    "MW2 CONTROLS   (F7 hide)\n"
+    "WASD  move        Mouse  look\n"
+    "Shift  sprint     Space  jump\n"
+    "C  crouch         Ctrl  prone\n"
+    "Left click  fire  Right click  aim\n"
+    "R  reload         1 / 2  switch weapon\n"
+    "G  grenade        H  tactical\n"
+    "V  melee          E  use: doors, items\n"
+    "F8  weapon menu   F9  refill ammo\n"
+    "F10  settings: FOV, mouse, ammo, skin\n"
+    "RE4 inventory, map and menu keys work\n"
+    "F6  MW2 on / off";
+
+std::string StatusText()
+{
+    if (g_active) return "";
+    if (!g_runtimeError.empty() && !g_requested) return "MW2: " + g_runtimeError + " - press F6 to retry";
+    if (!g_requested) return "";
+    if (g_guest.ready && GetTickCount() - g_guest.tick < 1500) return "MW2 ready - waiting for RE4 gameplay";
+    char text[96];
+    snprintf(text, sizeof(text), "MW2 loading... %lus  (F6 cancels)", (GetTickCount() - g_runtimeStarted) / 1000);
+    return text;
+}
+
+// Small square, top left: yellow = MW2 loading, white = ready but waiting, red = error. Hidden while active.
+DWORD IndicatorColor()
+{
+    if (g_active) return 0;
+    if (!g_runtimeError.empty() && !g_requested) return 0xffd03030;
+    if (!g_requested) return 0;
+    if (g_guest.ready && GetTickCount() - g_guest.tick < 1500) return 0xffffffff;
+    return 0xffe0c020;
+}
+
+void DrawOverlay(IDirect3DDevice9* device)
+{
+    if (!g_shared)
+        return;
+    DWORD indicator = IndicatorColor();
+    // Menus and pause stop RE4's gameplay camera: hide MW2 after two presented frames without one.
+    static LONG lastFrameSeen = 0;
+    static int missed = 0;
+    missed = g_frame != lastFrameSeen ? 0 : missed + 1;
+    lastFrameSeen = g_frame;
+    bool ticking = missed < 2 && GetTickCount() - g_lastTick < 200;
+    if (!ticking)
+    {
+        indicator = 0;
+        Lock lock(g_controlMutex);
+        if (lock.acquired)
+            ((Control*)g_shared)->host.enabled = 0; // MW2 ignores input while RE4 is paused
+    }
+    bool drawMw2 = g_active && ticking;
+    if (!drawMw2 && !indicator)
+        return;
+    CreateChromaShader(device);
+    uint32_t sequence = 0;
+    if (g_active)
+    {
+        Lock lock(g_frameMutex);
+        if (lock.acquired)
+        {
+            auto* frame = (Frame*)(g_shared + FrameOffset);
+            if (frame->sequence != g_lastFrame && frame->width && frame->height && frame->width <= MaxWidth &&
+                frame->height <= MaxHeight)
+            {
+                g_imageW = frame->width;
+                g_imageH = frame->height;
+                sequence = frame->sequence;
+                g_pixels.assign(g_shared + PixelOffset, g_shared + PixelOffset + g_imageW * g_imageH * 4);
+            }
+        }
+    }
+    if (sequence)
+    {
+        D3DSURFACE_DESC desc{};
+        if (g_texture)
+            g_texture->GetLevelDesc(0, &desc);
+        if (g_texture && (desc.Width != g_imageW || desc.Height != g_imageH))
+            ReleaseTexture();
+        if (!g_texture)
+            device->CreateTexture(g_imageW, g_imageH, 1, D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &g_texture, nullptr);
+        D3DLOCKED_RECT rect{};
+        if (g_texture && SUCCEEDED(g_texture->LockRect(0, &rect, nullptr, D3DLOCK_DISCARD)))
+        {
+            for (uint32_t y = 0; y < g_imageH; y++)
+            {
+                auto* row = (uint8_t*)rect.pBits + y * rect.Pitch;
+                auto* src = g_pixels.data() + y * g_imageW * 4;
+                if (g_chroma) memcpy(row, src, g_imageW * 4);
+                else CpuChroma(row, src, g_imageW);
+            }
+            g_texture->UnlockRect(0);
+            g_lastFrame = sequence;
+        }
+    }
+
+    IDirect3DSurface9* backBuffer = nullptr;
+    if (FAILED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer)))
+        return;
+    D3DSURFACE_DESC screen{};
+    backBuffer->GetDesc(&screen);
+    IDirect3DStateBlock9* saved = nullptr;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &saved)))
+    {
+        backBuffer->Release();
+        return;
+    }
+    saved->Capture();
+    IDirect3DSurface9* previousTarget = nullptr;
+    device->GetRenderTarget(0, &previousTarget);
+    device->SetRenderTarget(0, backBuffer);
+    if (SUCCEEDED(device->BeginScene()))
+    {
+        D3DVIEWPORT9 full{ 0, 0, screen.Width, screen.Height, 0.f, 1.f };
+        device->SetViewport(&full);
+        device->SetVertexShader(nullptr);
+        device->SetPixelShader(nullptr);
+        device->SetRenderState(D3DRS_ZENABLE, FALSE);
+        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+        device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+        device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+        device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+        device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+        device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+        device->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_COLORWRITEENABLE, 15);
+        device->SetRenderState(D3DRS_FILLMODE, D3DFILL_SOLID);
+        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+        device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        device->SetTextureStageState(0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+        device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+        device->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+        device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        float w = (float)screen.Width, h = (float)screen.Height;
+        if (drawMw2 && g_texture)
+        {
+            device->SetPixelShader(g_chroma);
+            Quad(device, 0, 0, w, h, 0xffffffff, g_texture);
+            device->SetPixelShader(nullptr);
+        }
+        int textPx = std::max(12, (int)(h * .022f));
+        if (indicator)
+        {
+            device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+            device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+            float s = std::max(10.f, h * .02f);
+            Quad(device, s, s, s, s, 0xff000000);
+            Quad(device, s + 2, s + 2, s - 4, s - 4, indicator);
+            std::string status = StatusText();
+            if (!status.empty() && UpdateText(device, g_statusText, status, textPx))
+                DrawPanel(device, g_statusText, s * 2.6f, s - textPx * .1f, indicator);
+        }
+        if (drawMw2 && g_cfg.showControls && !MenuOpen() && UpdateText(device, g_helpText, kHelp, textPx))
+        {
+            float m = h * .03f;
+            DrawPanel(device, g_helpText, m, m, 0xffffffff);
+        }
+        if (drawMw2)
+        {
+            // Leon's health (RE4 owns health): bar bottom left, red screen edges when hurt.
+            uint8_t* g = Global();
+            int hp = g ? At<int16_t>(g, re4::G_plHp) : 0, hpMax = g ? std::max<int>(1, At<int16_t>(g, re4::G_plHpMax)) : 1;
+            float frac = std::clamp((float)hp / hpMax, 0.f, 1.f);
+            float bx = w * .025f, by = h * .93f, bw = w * .16f, bh = std::max(8.f, h * .014f);
+            device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+            device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+            Quad(device, bx - 3, by - 3, bw + 6, bh + 6, 0xc0181818);
+            Quad(device, bx, by, bw, bh, 0xff505050);
+            if (frac > 0)
+                Quad(device, bx, by, bw * frac, bh, frac < .3f ? 0xffdf4545 : (frac < .6f ? 0xffe0c040 : 0xff7ed091));
+            DWORD now = GetTickCount();
+            if (now < g_damageUntil)
+            {
+                DWORD a = (DWORD)(150 * g_damageStrength * (g_damageUntil - now) / 850.f);
+                DWORD c = (a << 24) | 0x00b00000;
+                Quad(device, 0, 0, w, h * .045f, c);
+                Quad(device, 0, h * .955f, w, h * .045f, c);
+                Quad(device, 0, h * .045f, w * .025f, h * .91f, c);
+                Quad(device, w * .975f, h * .045f, w * .025f, h * .91f, c);
+            }
+            char hpText[32];
+            snprintf(hpText, sizeof(hpText), "HP %d / %d", std::max(0, hp), hpMax);
+            if (UpdateText(device, g_hpText, hpText, std::max(10, textPx * 4 / 5)))
+            {
+                device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+                device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+                Quad(device, bx + 1, by - g_hpText.height - 2.f, (float)g_hpText.width, (float)g_hpText.height, 0xff000000, g_hpText.texture);
+                Quad(device, bx, by - g_hpText.height - 3.f, (float)g_hpText.width, (float)g_hpText.height, 0xffffffff, g_hpText.texture);
+            }
+        }
+        if (drawMw2 && g_settingsMenu && UpdateText(device, g_settingsText, SettingsText(), (int)(textPx * 1.15f)))
+            DrawPanel(device, g_settingsText, (w - g_settingsText.width) / 2, h * .22f, 0xfff0f0f0);
+        if (drawMw2 && g_weaponMenu && UpdateText(device, g_menuText, WeaponMenuText(), (int)(textPx * 1.15f)))
+            DrawPanel(device, g_menuText, (w - g_menuText.width) / 2, h * .16f, 0xfff0f0f0);
+        if (drawMw2 && GetTickCount() < g_noticeUntil && UpdateText(device, g_noticeText, g_notice, textPx))
+            DrawPanel(device, g_noticeText, h * .03f, h * .80f, 0xffffd746);
+        device->EndScene();
+    }
+    if (previousTarget)
+    {
+        device->SetRenderTarget(0, previousTarget);
+        previousTarget->Release();
+    }
+    backBuffer->Release();
+    saved->Apply();
+    saved->Release();
+}
+
+using PresentFn = HRESULT(WINAPI*)(IDirect3DDevice9*, const RECT*, const RECT*, HWND, const RGNDATA*);
+using ResetFn = HRESULT(WINAPI*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
+using SwapPresentFn = HRESULT(WINAPI*)(IDirect3DSwapChain9*, const RECT*, const RECT*, HWND, const RGNDATA*, DWORD);
+PresentFn g_presentOrig = nullptr;
+ResetFn g_resetOrig = nullptr;
+SwapPresentFn g_swapPresentOrig = nullptr;
+bool g_loggedPresent = false;
+
+void SafeDrawOverlay(IDirect3DDevice9* device)
+{
+    __try
+    {
+        DrawOverlay(device);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log("overlay draw faulted");
+    }
+}
+
+void BeforePresent(IDirect3DDevice9* device, const char* via)
+{
+    if (!g_loggedPresent)
+    {
+        g_loggedPresent = true;
+        Log("first frame presented via %s; overlay hook working", via);
+    }
+    SafeDrawOverlay(device);
+    if (g_shared)
+    {
+        Lock lock(g_controlMutex);
+        if (lock.acquired)
+            ((Control*)g_shared)->host.tick = GetTickCount();
+    }
+}
+
+HRESULT WINAPI PresentHook(IDirect3DDevice9* device, const RECT* src, const RECT* dst, HWND window, const RGNDATA* dirty)
+{
+    BeforePresent(device, "device Present");
+    g_drawnThisPresent = true;
+    HRESULT hr = g_presentOrig(device, src, dst, window, dirty);
+    g_drawnThisPresent = false;
+    return hr;
+}
+
+HRESULT WINAPI SwapPresentHook(IDirect3DSwapChain9* chain, const RECT* src, const RECT* dst, HWND window,
+                               const RGNDATA* dirty, DWORD flags)
+{
+    if (!g_drawnThisPresent)
+    {
+        IDirect3DDevice9* device = nullptr;
+        if (SUCCEEDED(chain->GetDevice(&device)) && device)
+        {
+            BeforePresent(device, "swap chain Present");
+            device->Release();
+        }
+    }
+    return g_swapPresentOrig(chain, src, dst, window, dirty, flags);
+}
+
+HRESULT WINAPI ResetHook(IDirect3DDevice9* device, D3DPRESENT_PARAMETERS* params)
+{
+    ReleaseTexture();
+    Log("D3D9 device reset");
+    return g_resetOrig(device, params);
+}
+
+void PatchSlot(void** table, int slot, void* hook, void** orig)
+{
+    DWORD old;
+    if (table[slot] == hook)
+        return;
+    if (VirtualProtect(&table[slot], sizeof(void*), PAGE_EXECUTE_READWRITE, &old))
+    {
+        *orig = table[slot];
+        table[slot] = hook;
+        VirtualProtect(&table[slot], sizeof(void*), old, &old);
+    }
+}
+
+void HookDevice(IDirect3DDevice9* device)
+{
+    void** table = *(void***)device;
+    PatchSlot(table, 16, (void*)&ResetHook, (void**)&g_resetOrig);
+    PatchSlot(table, 17, (void*)&PresentHook, (void**)&g_presentOrig);
+    IDirect3DSwapChain9* chain = nullptr;
+    if (SUCCEEDED(device->GetSwapChain(0, &chain)) && chain)
+    {
+        PatchSlot(*(void***)chain, 3, (void*)&SwapPresentHook, (void**)&g_swapPresentOrig);
+        chain->Release();
+    }
+    Log("overlay: hooked RE4's D3D9 device (Present/Reset)");
+}
+
+// RE4 creates its Direct3D object through one call; wrap it so the overlay attaches to the exact
+// device RE4 creates (a generic probe device can have a different vtable, e.g. a pure device).
+using CreateDeviceFn = HRESULT(WINAPI*)(IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
+CreateDeviceFn g_createDeviceOrig = nullptr;
+HRESULT WINAPI CreateDeviceHook(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type, HWND window, DWORD flags,
+                                D3DPRESENT_PARAMETERS* params, IDirect3DDevice9** out)
+{
+    HRESULT hr = g_createDeviceOrig(d3d, adapter, type, window, flags, params, out);
+    Log("RE4 created its D3D9 device: hr=0x%08lX flags=0x%08lX %ux%u windowed=%d", hr, flags,
+        params ? params->BackBufferWidth : 0, params ? params->BackBufferHeight : 0, params ? params->Windowed : -1);
+    if (SUCCEEDED(hr) && out && *out)
+        HookDevice(*out);
+    return hr;
+}
+
+using D3DCreateFn = IDirect3D9*(WINAPI*)(UINT);
+D3DCreateFn g_d3dCreateOrig = nullptr;
+IDirect3D9* WINAPI D3DCreateHook(UINT version)
+{
+    IDirect3D9* d3d = g_d3dCreateOrig(version);
+    if (d3d)
+        PatchSlot(*(void***)d3d, 16, (void*)&CreateDeviceHook, (void**)&g_createDeviceOrig);
+    Log("RE4 created its Direct3D9 object (%p)", (void*)d3d);
+    return d3d;
+}
+
+// ---------------------------------------------------------------- startup
+bool g_ready = false;
+DWORD WINAPI StartBridge(void*);
+
+bool Init()
+{
+    Module m = ReadModule();
+    uint8_t* a = Find(m, re4::kGlobalPtr);
+    uint8_t* b = Find(m, re4::kPlayerPtr);
+    uint8_t* c = Find(m, re4::kHitCheckCall);
+    uint8_t* d = Find(m, re4::kCameraSetCall);
+    uint8_t* e = Find(m, re4::kMouseX);
+    uint8_t* f = Find(m, re4::kMouseY);
+    uint8_t* s = Find(m, re4::kSatMgr);
+    uint8_t* x = Find(m, re4::kD3DCreateCall);
+    uint8_t* ko = Find(m, re4::kKeyOn);
+    uint8_t* kt = Find(m, re4::kKeyTrg);
+    uint8_t* jy = Find(m, re4::kJoy);
+    uint8_t* pr = Find(m, re4::kPadReadCall);
+    uint8_t* em = Find(m, re4::kEmMgr);
+    if (uint8_t* bh = Find(m, re4::kBulletHit))
+        g_bulletHit = (BulletHitFn)bh;
+    if (uint8_t* ab = Find(m, re4::kActBtn))
+        g_actBtnActive = *(uint8_t**)ab;
+    if (uint8_t* fx = Find(m, re4::kExplosionFx))
+    {
+        g_effect = (EffectFn)(fx + 0x17 + 5 + *(int32_t*)(fx + 0x18));
+        g_sound = (SoundFn)(fx + 0x27 + 5 + *(int32_t*)(fx + 0x28));
+    }
+    if (uint8_t* q = Find(m, re4::kQteActive))
+        g_qteActive = *(uint8_t**)q;
+    if (uint8_t* ms = Find(m, re4::kMesSetCall))
+    {
+        uint8_t* thunk = ms[0] == 0xE8 ? ms + 5 + *(int32_t*)(ms + 1) : nullptr;
+        if (thunk && HookThunk(thunk, (void*)&MesSetHook, (void**)&g_mesSetOrig))
+            Log("captions: MesSet hooked at thunk 0x%p", (void*)thunk);
+    }
+    if (uint8_t* ids = Find(m, re4::kIdSys))
+        g_idSys = *(uint8_t**)ids;
+    if (em)
+        g_emMgr = *(uint8_t**)em;
+    if (!m.code.empty())
+    {
+        g_textBegin = m.code[0].begin;
+        g_textEnd = m.code[0].begin + m.code[0].size;
+    }
+    if (!a || !b || !c || !d || !e || !f || !s || !x || !ko || !kt || !jy || !pr)
+        return false;
+    g_keyOn = *(uint64_t**)ko;
+    g_keyTrg = *(uint64_t**)kt;
+    g_joy = *(uint8_t**)jy - 9;
+    g_pG = *(uint8_t***)a;
+    g_pPL = *(uint8_t***)b;
+    g_mouseX = *(int32_t**)e;
+    g_mouseY = *(int32_t**)f;
+    g_satMgr = *(uint8_t**)s;
+    Log("pG=0x%p pPL=0x%p mouse=0x%p/0x%p SatMgr=0x%p", (void*)g_pG, (void*)g_pPL, (void*)g_mouseX, (void*)g_mouseY,
+        (void*)g_satMgr);
+    if (!HookCall(c, (void*)&HitCheckHook, (void**)&g_hitCheckOrig))
+        return false;
+    if (!HookCall(d, (void*)&CameraSetHook, (void**)&g_cameraSetOrig))
+        return false;
+    if (!HookCall(x, (void*)&D3DCreateHook, (void**)&g_d3dCreateOrig))
+        return false;
+    if (!HookCall(pr, (void*)&PadReadHook, (void**)&g_padReadOrig))
+        return false;
+    Log("input filter on PadRead: keys 0x%p/0x%p joy 0x%p", (void*)g_keyOn, (void*)g_keyTrg, (void*)g_joy);
+    if (g_cfg.damageTrace && g_emMgr)
+    {
+        AddVectoredExceptionHandler(1, TraceHandler);
+        CreateThread(nullptr, 0, TraceArmer, nullptr, 0, nullptr);
+        Log("damage trace on: shoot a Ganado with Leon's own gun (F6 off); writers are logged as TRACE lines");
+    }
+    Log("hooked CameraQuasiFPS::hitCheck and the camera set call in CameraControl::move");
+    return true;
+}
+
+DWORD WINAPI Startup(void*)
+{
+    // The exe may still be unpacking when we load; retry for up to 30 s.
+    for (int i = 0; i < 60 && !g_ready; ++i)
+    {
+        Sleep(500);
+        g_ready = Init();
+    }
+    if (!g_ready)
+    {
+        Log("startup failed: nothing hooked, game unchanged");
+        return 0;
+    }
+    return StartBridge(nullptr);
+}
+
+DWORD WINAPI StartBridge(void*)
+{
+    if (!CreateBridge())
+        Log("shared memory failed; MW2 cannot start");
+    Log("ready: load a save, then press F6 to start MW2 (about a minute the first time)");
+    return 0;
+}
+} // namespace
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        DisableThreadLibraryCalls(module);
+        GetModuleFileNameA(module, g_dir, MAX_PATH);
+        if (char* slash = strrchr(g_dir, '\\'))
+            slash[1] = 0;
+        OpenLog();
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        GetFileAttributesExA(exe, GetFileExInfoStandard, &fa);
+        Log("%s loaded into %s (%lu bytes)", kVersion, exe, fa.nFileSizeLow);
+        LoadSettings();
+        g_ready = Init(); // patch the game before it runs, as in phase 1
+        CreateThread(nullptr, 0, g_ready ? StartBridge : Startup, nullptr, 0, nullptr);
+    }
+    else if (reason == DLL_PROCESS_DETACH)
+    {
+        if (g_shared)
+        {
+            ((Control*)g_shared)->host.shutdown = 1; // MW2 runtime exits on its own
+        }
+    }
+    return TRUE;
+}

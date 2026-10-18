@@ -1,0 +1,389 @@
+// MW2RE4.asi - phase 1 host plugin for RE4 UHD (Steam).
+// 1. Writes MW2RE4.log next to the ASI.
+// 2. Reads Leon's position/rotation and the camera every frame and logs them.
+// 3. F6 toggles a test camera: RE4's camera is driven from test values in MW2RE4.ini.
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <vector>
+#include "Re4Game.h"
+
+namespace
+{
+constexpr const char* kVersion = "MW2RE4 v1 (phase 1)";
+
+// ---------------------------------------------------------------- log
+FILE* g_log = nullptr;
+CRITICAL_SECTION g_logLock;
+char g_dir[MAX_PATH]; // folder of the ASI, with trailing backslash
+
+void Log(const char* fmt, ...)
+{
+    if (!g_log)
+        return;
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    EnterCriticalSection(&g_logLock);
+    fprintf(g_log, "[%02d:%02d:%02d.%03d] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(g_log, fmt, args);
+    va_end(args);
+    fputc('\n', g_log);
+    fflush(g_log);
+    LeaveCriticalSection(&g_logLock);
+}
+
+void OpenLog()
+{
+    InitializeCriticalSection(&g_logLock);
+    char path[MAX_PATH], prev[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.log", g_dir);
+    snprintf(prev, sizeof(prev), "%sMW2RE4.prev.log", g_dir);
+    MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
+    g_log = _fsopen(path, "w", _SH_DENYWR);
+}
+
+// ---------------------------------------------------------------- settings
+struct Settings
+{
+    int logEveryNFrames = 30;
+    int toggleKey = VK_F6;
+    float testEyeHeight = 1600.f; // game units above the camera frame origin
+    float testYawDeg = 0.f;
+    float testPitchDeg = 0.f;
+    float testSweepDegPerSec = 20.f;
+    float testFov = 0.f; // 0 = keep RE4's
+} g_cfg;
+
+float IniFloat(const char* path, const char* key, float def)
+{
+    char buf[64], defBuf[64];
+    snprintf(defBuf, sizeof(defBuf), "%g", def);
+    GetPrivateProfileStringA("MW2RE4", key, defBuf, buf, sizeof(buf), path);
+    return (float)atof(buf);
+}
+
+void LoadSettings()
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    g_cfg.logEveryNFrames = GetPrivateProfileIntA("MW2RE4", "LogEveryNFrames", g_cfg.logEveryNFrames, path);
+    if (g_cfg.logEveryNFrames < 1)
+        g_cfg.logEveryNFrames = 1;
+    g_cfg.toggleKey = GetPrivateProfileIntA("MW2RE4", "TestCameraKey", g_cfg.toggleKey, path);
+    g_cfg.testEyeHeight = IniFloat(path, "TestEyeHeight", g_cfg.testEyeHeight);
+    g_cfg.testYawDeg = IniFloat(path, "TestYawDeg", g_cfg.testYawDeg);
+    g_cfg.testPitchDeg = IniFloat(path, "TestPitchDeg", g_cfg.testPitchDeg);
+    g_cfg.testSweepDegPerSec = IniFloat(path, "TestSweepDegPerSec", g_cfg.testSweepDegPerSec);
+    g_cfg.testFov = IniFloat(path, "TestFov", g_cfg.testFov);
+    Log("settings: LogEveryNFrames=%d TestCameraKey=0x%X TestEyeHeight=%.1f TestYawDeg=%.1f TestPitchDeg=%.1f "
+        "TestSweepDegPerSec=%.1f TestFov=%.1f",
+        g_cfg.logEveryNFrames, g_cfg.toggleKey, g_cfg.testEyeHeight, g_cfg.testYawDeg, g_cfg.testPitchDeg,
+        g_cfg.testSweepDegPerSec, g_cfg.testFov);
+}
+
+// ---------------------------------------------------------------- pattern scan
+struct Module
+{
+    uint8_t* base = nullptr;
+    struct Range { uint8_t* begin; size_t size; };
+    std::vector<Range> code;
+};
+
+Module ReadModule()
+{
+    Module m;
+    m.base = (uint8_t*)GetModuleHandleA(nullptr);
+    auto dos = (IMAGE_DOS_HEADER*)m.base;
+    auto nt = (IMAGE_NT_HEADERS*)(m.base + dos->e_lfanew);
+    auto sec = IMAGE_FIRST_SECTION(nt);
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec)
+        if (sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)
+            m.code.push_back({ m.base + sec->VirtualAddress, sec->Misc.VirtualSize });
+    return m;
+}
+
+// Returns the number of matches; *first gets the first one.
+int Scan(const Module& m, const char* text, uint8_t** first)
+{
+    std::vector<int> pat;
+    for (const char* p = text; *p;)
+    {
+        if (*p == ' ') { ++p; continue; }
+        if (*p == '?') { pat.push_back(-1); ++p; continue; }
+        pat.push_back((int)strtoul(p, nullptr, 16));
+        p += 2;
+    }
+    int count = 0;
+    *first = nullptr;
+    for (auto& r : m.code)
+    {
+        if (r.size < pat.size())
+            continue;
+        for (size_t i = 0; i + pat.size() <= r.size; ++i)
+        {
+            size_t k = 0;
+            while (k < pat.size() && (pat[k] < 0 || r.begin[i + k] == (uint8_t)pat[k]))
+                ++k;
+            if (k == pat.size())
+            {
+                if (!count)
+                    *first = r.begin + i;
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+uint8_t* Find(const Module& m, const re4::Pattern& p)
+{
+    uint8_t* hit;
+    int n = Scan(m, p.bytes, &hit);
+    if (n != 1)
+    {
+        Log("pattern %s: %d matches (need exactly 1)", p.name, n);
+        return nullptr;
+    }
+    Log("pattern %s: found at bio4.exe+0x%X", p.name, (unsigned)(hit - m.base));
+    return hit + p.offset;
+}
+
+// ---------------------------------------------------------------- game access
+uint8_t** g_pG = nullptr;     // GLOBAL_WK**
+uint8_t** g_pPL = nullptr;    // cPlayer**
+uint8_t* g_camCtrl = nullptr; // CameraControl*
+
+template <class T> T& At(uint8_t* base, size_t off) { return *(T*)(base + off); }
+
+uint8_t* Global() { return g_pG ? *g_pG : nullptr; }
+
+uint8_t* Player()
+{
+    if (!g_pPL || !*g_pPL)
+        return nullptr;
+    if (**(uintptr_t**)g_pPL < 0x10000) // vtable sanity check, as re4_tweaks does
+        return nullptr;
+    return *g_pPL;
+}
+
+// ---------------------------------------------------------------- hitCheck hook
+using HitCheckFn = void(__fastcall*)(void* self, void* edx, float* plMat, void* offset, CameraPoint* aim);
+HitCheckFn g_hitCheckOrig = nullptr;
+
+bool g_testCamera = false;
+bool g_keyWasDown = false;
+float g_sweepDeg = 0.f;
+unsigned g_frame = 0;
+unsigned g_lastRoom = 0xFFFF;
+volatile LONG g_hookCalls = 0;
+
+constexpr float kDegToRad = 3.14159265358979f / 180.f;
+constexpr float kRadToDeg = 180.f / 3.14159265358979f;
+
+bool GameFocused()
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+void PollToggle()
+{
+    bool down = GameFocused() && (GetAsyncKeyState(g_cfg.toggleKey) & 0x8000);
+    if (down && !g_keyWasDown)
+    {
+        g_testCamera = !g_testCamera;
+        g_sweepDeg = 0.f;
+        Log("test camera %s", g_testCamera ? "ON" : "OFF");
+    }
+    g_keyWasDown = down;
+}
+
+void LogFrame(const char* why, const float* plMat, const CameraPoint* aim)
+{
+    uint8_t* g = Global();
+    uint8_t* pl = Player();
+    if (!g)
+        return;
+    unsigned room = At<uint16_t>(g, re4::G_curRoomId);
+    const auto& cam = At<CameraPoint>(g, re4::G_camPoint);
+    if (pl)
+    {
+        const auto& pos = At<Vec3>(pl, re4::Coord_pos);
+        const auto& ang = At<Vec3>(pl, re4::Coord_ang);
+        Log("%s f=%u room=r%03X hp=%d/%d leon pos=(%.1f, %.1f, %.1f) yaw=%.1f deg (ang %.3f %.3f %.3f) | "
+            "cam pos=(%.1f, %.1f, %.1f) target=(%.1f, %.1f, %.1f) fov=%.1f roll=%.3f",
+            why, g_frame, room, At<int16_t>(pl, re4::Em_hp), At<int16_t>(pl, re4::Em_hpMax),
+            pos.x, pos.y, pos.z, ang.y * kRadToDeg, ang.x, ang.y, ang.z,
+            cam.campos.x, cam.campos.y, cam.campos.z, cam.target.x, cam.target.y, cam.target.z, cam.fovy, cam.roll);
+    }
+    else
+    {
+        Log("%s f=%u room=r%03X (no player) cam pos=(%.1f, %.1f, %.1f) target=(%.1f, %.1f, %.1f) fov=%.1f",
+            why, g_frame, room, cam.campos.x, cam.campos.y, cam.campos.z,
+            cam.target.x, cam.target.y, cam.target.z, cam.fovy);
+    }
+    if (plMat && aim)
+    {
+        // The over-the-shoulder camera works in this frame; logged so phase 2 can map MW2's view into it.
+        Log("    plMat rows (%.3f %.3f %.3f | %.1f) (%.3f %.3f %.3f | %.1f) (%.3f %.3f %.3f | %.1f) "
+            "aim campos=(%.1f, %.1f, %.1f) target=(%.1f, %.1f, %.1f) fov=%.1f%s",
+            plMat[0], plMat[1], plMat[2], plMat[3], plMat[4], plMat[5], plMat[6], plMat[7],
+            plMat[8], plMat[9], plMat[10], plMat[11],
+            aim->campos.x, aim->campos.y, aim->campos.z, aim->target.x, aim->target.y, aim->target.z,
+            aim->fovy, g_testCamera ? " [test camera]" : "");
+    }
+    g_lastRoom = room;
+}
+
+void __fastcall HitCheckHook(void* self, void* edx, float* plMat, void* offset, CameraPoint* aim)
+{
+    g_hitCheckOrig(self, edx, plMat, offset, aim);
+    InterlockedIncrement(&g_hookCalls);
+    ++g_frame;
+    PollToggle();
+
+    uint8_t* g = Global();
+    if (g_testCamera && g && aim)
+    {
+        // Test value: camera at eye height, looking along a fixed yaw/pitch that slowly sweeps.
+        float dtSec = At<float>(g, re4::G_deltaTime) / 30.f;
+        g_sweepDeg = fmodf(g_sweepDeg + g_cfg.testSweepDegPerSec * dtSec, 360.f);
+        float yaw = (g_cfg.testYawDeg + g_sweepDeg) * kDegToRad;
+        float pitch = g_cfg.testPitchDeg * kDegToRad;
+        Vec3 eye{ 0.f, g_cfg.testEyeHeight, 0.f };
+        Vec3 dir{ sinf(yaw) * cosf(pitch), sinf(pitch), cosf(yaw) * cosf(pitch) };
+        aim->campos = eye;
+        aim->target = { eye.x + dir.x * 1000.f, eye.y + dir.y * 1000.f, eye.z + dir.z * 1000.f };
+        aim->roll = 0.f;
+        if (g_cfg.testFov > 0.f)
+            aim->fovy = g_cfg.testFov;
+    }
+
+    if (g)
+    {
+        unsigned room = At<uint16_t>(g, re4::G_curRoomId);
+        if (room != g_lastRoom)
+            LogFrame("room", plMat, aim);
+        else if (g_frame % (unsigned)g_cfg.logEveryNFrames == 0)
+            LogFrame("frame", plMat, aim);
+    }
+}
+
+bool HookCall(uint8_t* site, void* hook, void** orig)
+{
+    if (site[0] != 0xE8)
+    {
+        Log("hook: expected CALL (E8) at bio4.exe+0x%X, found %02X; not hooking",
+            (unsigned)(site - (uint8_t*)GetModuleHandleA(nullptr)), site[0]);
+        return false;
+    }
+    int32_t rel = *(int32_t*)(site + 1);
+    *orig = site + 5 + rel;
+    DWORD old;
+    if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old))
+        return false;
+    *(int32_t*)(site + 1) = (int32_t)((uint8_t*)hook - (site + 5));
+    VirtualProtect(site, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+    return true;
+}
+
+// ---------------------------------------------------------------- startup
+bool g_ready = false;
+
+bool Init()
+{
+    Module m = ReadModule();
+    uint8_t* a = Find(m, re4::kGlobalPtr);
+    uint8_t* b = Find(m, re4::kPlayerPtr);
+    uint8_t* c = Find(m, re4::kCamCtrl);
+    uint8_t* d = Find(m, re4::kHitCheckCall);
+    if (!a || !b || !c || !d)
+        return false;
+    g_pG = *(uint8_t***)a;
+    g_pPL = *(uint8_t***)b;
+    g_camCtrl = *(uint8_t**)c;
+    Log("pG=0x%p pPL=0x%p CamCtrl=0x%p", (void*)g_pG, (void*)g_pPL, (void*)g_camCtrl);
+    if (!HookCall(d, (void*)&HitCheckHook, (void**)&g_hitCheckOrig))
+        return false;
+    Log("hooked CameraQuasiFPS::hitCheck call (original at bio4.exe+0x%X)",
+        (unsigned)((uint8_t*)g_hitCheckOrig - m.base));
+    return true;
+}
+
+// Logs a heartbeat every 5 s, including when the camera hook is not running (menus, cutscenes).
+DWORD WINAPI Heartbeat(void*)
+{
+    for (;;)
+    {
+        Sleep(5000);
+        LONG calls = InterlockedExchange(&g_hookCalls, 0);
+        unsigned room = 0, rno0 = 0;
+        __try
+        {
+            if (uint8_t* g = Global())
+            {
+                room = At<uint16_t>(g, re4::G_curRoomId);
+                rno0 = At<uint8_t>(g, re4::G_rno0);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        Log("heartbeat: camera hook ran %ld times in 5 s, room=r%03X state=%u, test camera %s",
+            calls, room, rno0, g_testCamera ? "ON" : "OFF");
+    }
+    return 0;
+}
+
+DWORD WINAPI Startup(void*)
+{
+    // The exe may still be unpacking when we load; retry for up to 30 s.
+    for (int i = 0; i < 60 && !g_ready; ++i)
+    {
+        g_ready = Init();
+        if (!g_ready)
+            Sleep(500);
+    }
+    Log(g_ready ? "ready: play, then press F6 for the test camera" : "startup failed: nothing hooked, game unchanged");
+    if (g_ready)
+        CreateThread(nullptr, 0, Heartbeat, nullptr, 0, nullptr);
+    return 0;
+}
+} // namespace
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        DisableThreadLibraryCalls(module);
+        GetModuleFileNameA(module, g_dir, MAX_PATH);
+        if (char* slash = strrchr(g_dir, '\\'))
+            slash[1] = 0;
+        OpenLog();
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        GetFileAttributesExA(exe, GetFileExInfoStandard, &fa);
+        Log("%s loaded into %s (%lu bytes)", kVersion, exe, fa.nFileSizeLow);
+        LoadSettings();
+        g_ready = Init();
+        if (g_ready)
+        {
+            Log("ready: play, then press F6 for the test camera");
+            CreateThread(nullptr, 0, Heartbeat, nullptr, 0, nullptr);
+        }
+        else
+        {
+            Log("patterns not found yet; retrying in the background");
+            CreateThread(nullptr, 0, Startup, nullptr, 0, nullptr);
+        }
+    }
+    return TRUE;
+}
