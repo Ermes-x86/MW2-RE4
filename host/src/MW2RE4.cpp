@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v15 (RE4 captions moved up)";
+constexpr const char* kVersion = "MW2RE4 v16 (balanced pistols/SMGs/magnums, UAV radar)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -75,6 +75,13 @@ struct Settings
     int rifleWeapon = 0x01; // RE4 weapon whose damage MW2 assault rifles and LMGs use (1 = handgun; was Chicago 0x0C)
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
+    // RE4 weapon whose damage each MW2 gun group uses (RE4 base damage: TMP 0.4, handgun 1.0, Red9 1.4,
+    // Blacktail 1.6, Chicago 10, Broken Butterfly 13)
+    int pistolWeapon = 0x01;        // usp, beretta: handgun
+    int machinePistolWeapon = 0x0B; // glock, beretta393, pp2000, tmp: TMP
+    int smgWeapon = 0x01;           // mp5k, ump45, kriss, p90, uzi: handgun (was TMP)
+    int magnumWeapon = 0x03;        // deserteagle, coltanaconda: Red9 (was Broken Butterfly, one-shot kills)
+    int uavSeconds = 30, uavCooldown = 60;
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
 } g_cfg;
@@ -125,6 +132,13 @@ void LoadSettings()
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
     g_cfg.promptRaise = IniFloat(path, "PromptRaise", g_cfg.promptRaise);
     g_cfg.messageRaise = IniFloat(path, "MessageRaise", g_cfg.messageRaise);
+    auto weaponKey = [&](const char* key, int& v) { v = std::clamp((int)GetPrivateProfileIntA("MW2RE4", key, v, path), 0x01, 0x21); };
+    weaponKey("PistolWeapon", g_cfg.pistolWeapon);
+    weaponKey("MachinePistolWeapon", g_cfg.machinePistolWeapon);
+    weaponKey("SmgWeapon", g_cfg.smgWeapon);
+    weaponKey("MagnumWeapon", g_cfg.magnumWeapon);
+    g_cfg.uavSeconds = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavSeconds", g_cfg.uavSeconds, path), 5, 600);
+    g_cfg.uavCooldown = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavCooldown", g_cfg.uavCooldown, path), 0, 600);
     g_cfg.infiniteAmmo = GetPrivateProfileIntA("MW2RE4", "InfiniteAmmo", g_cfg.infiniteAmmo, path);
     g_cfg.skin = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "Skin", g_cfg.skin, path), 0, kSkinCount - 1);
     g_cfg.rifleWeapon = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "RifleWeapon", g_cfg.rifleWeapon, path), 0x01, 0x21);
@@ -719,9 +733,11 @@ int Re4WeaponFor(const char* name, float rangeMetres)
     if (rangeMetres < 3.f)
         return re4::WEP_KNIFE; // MW2 melee
     if (StartsWithAny(name, { "deserteagle", "coltanaconda" }))
-        return re4::WEP_BROKEN_BUTTERFLY;
-    if (StartsWithAny(name, { "glock", "beretta393", "pp2000", "tmp", "mp5k", "ump45", "kriss", "p90", "uzi" }))
-        return re4::WEP_TMP;
+        return g_cfg.magnumWeapon;
+    if (StartsWithAny(name, { "glock", "beretta393", "pp2000", "tmp" }))
+        return g_cfg.machinePistolWeapon;
+    if (StartsWithAny(name, { "mp5k", "ump45", "kriss", "p90", "uzi" }))
+        return g_cfg.smgWeapon;
     if (StartsWithAny(name, { "ak47", "m4", "famas", "fal", "scar", "tavor", "fn2000", "masada", "m16", "aug", "rpd",
                               "sa80", "mg4", "m240" }))
         return g_cfg.rifleWeapon; // the Chicago Typewriter killed Ganados in one shot at MW2's fire rate
@@ -735,7 +751,7 @@ int Re4WeaponFor(const char* name, float rangeMetres)
         return re4::WEP_SHOTGUN;
     if (StartsWithAny(name, { "rpg", "at4", "m79" }))
         return re4::WEP_RPG;
-    return re4::WEP_HANDGUN; // beretta, usp and anything unknown
+    return g_cfg.pistolWeapon; // beretta, usp and anything unknown
 }
 
 int CallBulletHit(uint8_t* pl, Vec3 start, Vec3 end, int weapon)
@@ -850,6 +866,70 @@ void ResolveShots(uint8_t* pl)
         ++g_blastsSent;
         Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s, BulletHit returned %d", e.sequence,
             name[0] ? name : "?", e.kind, e.radius, flash ? "flash grenade" : "hand grenade", hits);
+    }
+}
+
+// ---------------------------------------------------------------- UAV
+// MW2's own UAV only reveals MW2 players, so this one reads RE4's enemy list: U calls it in, a radar
+// (top right) shows every live enemy around Leon for UavSeconds, then it needs UavCooldown to come back.
+void Notice(const std::string& text, DWORD ms);
+DWORD g_uavUntil = 0, g_uavReadyAt = 0;
+struct RadarDot { float right, forward; };
+std::vector<RadarDot> g_radarDots;
+
+void UavInput(bool focused)
+{
+    static bool was = false;
+    bool down = focused && g_active && !MenuOpen() && Down('U');
+    DWORD now = GetTickCount();
+    if (down && !was)
+    {
+        if (now < g_uavUntil)
+            ;
+        else if (now < g_uavReadyAt)
+        {
+            char t[64];
+            snprintf(t, sizeof(t), "UAV ready in %lu s", (g_uavReadyAt - now + 999) / 1000);
+            Notice(t, 1500);
+        }
+        else
+        {
+            g_uavUntil = now + g_cfg.uavSeconds * 1000;
+            g_uavReadyAt = g_uavUntil + g_cfg.uavCooldown * 1000;
+            Notice("UAV online", 2000);
+            Log("UAV called in for %d s", g_cfg.uavSeconds);
+        }
+    }
+    was = down;
+}
+
+void UpdateRadar(uint8_t* pl)
+{
+    g_radarDots.clear();
+    if (!g_emMgr || !pl || GetTickCount() >= g_uavUntil)
+        return;
+    __try
+    {
+        const Vec3 lp = At<Vec3>(pl, re4::Coord_pos);
+        float t = At<Vec3>(pl, re4::Coord_ang).y; // Leon faces (sin t, cos t) in x/z
+        float st = std::sin(t), ct = std::cos(t);
+        uint8_t* array = At<uint8_t*>(g_emMgr, re4::Mgr_array);
+        uint32_t count = At<uint32_t>(g_emMgr, re4::Mgr_count), stride = At<uint32_t>(g_emMgr, re4::Mgr_stride);
+        for (uint32_t i = 0; array && i < count && i < 512; ++i)
+        {
+            uint8_t* em = array + i * stride;
+            if (em == pl || (At<uint32_t>(em, re4::Unit_beFlag) & 0x601) == 0 || At<int16_t>(em, re4::Em_hp) <= 0)
+                continue;
+            const Vec3 p = At<Vec3>(em, re4::Coord_pos);
+            float dx = (p.x - lp.x) / 1000.f, dz = (p.z - lp.z) / 1000.f;
+            float fwd = dx * st + dz * ct, right = -dx * ct + dz * st;
+            if (fwd * fwd + right * right < 50.f * 50.f)
+                g_radarDots.push_back({ right, fwd });
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        g_radarDots.clear();
     }
 }
 
@@ -1564,6 +1644,8 @@ void __cdecl CameraSetHook(uint8_t* camera)
     }
     g_helpKeyWasDown = helpKey;
     WeaponMenuInput(focused);
+    UavInput(focused);
+    UpdateRadar(pl);
     if (!g_active)
         UpdateTrace(pl);
 
@@ -1806,6 +1888,7 @@ const char* kHelp =
     "V  melee          E  use: doors, items\n"
     "F8  weapon menu   F9  refill ammo\n"
     "F10  settings: FOV, mouse, ammo, skin\n"
+    "U  UAV radar (shows Ganados)\n"
     "RE4 inventory, map and menu keys work\n"
     "F6  MW2 on / off";
 
@@ -2002,6 +2085,23 @@ void DrawOverlay(IDirect3DDevice9* device)
                 Quad(device, bx + 1, by - g_hpText.height - 2.f, (float)g_hpText.width, (float)g_hpText.height, 0xff000000, g_hpText.texture);
                 Quad(device, bx, by - g_hpText.height - 3.f, (float)g_hpText.width, (float)g_hpText.height, 0xffffffff, g_hpText.texture);
             }
+        }
+        if (drawMw2 && GetTickCount() < g_uavUntil)
+        {
+            // UAV radar: Leon at the centre facing up, 50 m to the edge, enemies as red dots
+            float size = h * .26f, x0 = w - size - h * .03f, y0 = h * .03f, cx = x0 + size / 2, cy = y0 + size / 2;
+            device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+            device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+            Quad(device, x0 - 2, y0 - 2, size + 4, size + 4, 0xd0000000);
+            Quad(device, x0, y0, size, size, 0xa0203020);
+            Quad(device, cx - .5f, y0, 1, size, 0x6080ff80);
+            Quad(device, x0, cy - .5f, size, 1, 0x6080ff80);
+            float sweep = (GetTickCount() % 2000) / 2000.f;
+            Quad(device, x0, y0 + size * sweep, size, 2, 0x5080ff80);
+            float scale = size / 2 / 50.f, d = std::max(4.f, h * .008f);
+            for (auto& dot : g_radarDots)
+                Quad(device, cx + dot.right * scale - d / 2, cy - dot.forward * scale - d / 2, d, d, 0xffff3030);
+            Quad(device, cx - d / 2, cy - d / 2, d, d, 0xffffff60);
         }
         if (drawMw2 && g_settingsMenu && UpdateText(device, g_settingsText, SettingsText(), (int)(textPx * 1.15f)))
             DrawPanel(device, g_settingsText, (w - g_settingsText.width) / 2, h * .22f, 0xfff0f0f0);

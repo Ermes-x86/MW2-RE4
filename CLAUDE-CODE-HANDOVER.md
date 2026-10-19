@@ -114,3 +114,8 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 ## v15 (2026-10-17)
 - Captions moved up while MW2 is active: MesSet's jmp thunk (found from the re4_tweaks item-examine call, pattern '68 84 00 02 00 51 53' +13) is redirected to MesSetHook, which lowers py by MessageRaise (150) for layouts 0 (caption) and 5 (system). IDC_MSG_WINDOW (0x2F) top-level units are raised by MessageRaise in RaisePrompts. Units/direction guessed (MesSet py screen-down, IDSystem y up); log lines 'caption ...' and 'caption window unit ...' give the real values.
 
+
+## v16 (2026-10-19)
+- Damage groups via INI: PistolWeapon 1 (usp, beretta), MachinePistolWeapon 11 TMP (glock, beretta393, pp2000, tmp), SmgWeapon 1 handgun (mp5k, ump45, kriss, p90, uzi; was TMP), MagnumWeapon 3 Red9 (deagle, anaconda; was Broken Butterfly).
+- UAV radar (U): MW2's UAV can't see RE4 enemies, so an overlay radar top right draws live EmMgr enemies within 50 m relative to Leon's facing, UavSeconds 30 / UavCooldown 60. Left/right orientation derived on paper (host right-handed); unverified.
+
