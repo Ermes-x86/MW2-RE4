@@ -123,3 +123,7 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 ## v17 (2026-10-19)
 - [Weapons] INI section: per-gun RE4 weapon (name prefix up to '_'), checked before the groups. Defaults ak47=3, m4=3 (Red9). Other rifles/LMGs stay RifleWeapon=1 (handgun; the log already showed 0x01 for m240, the user thought they used TMP).
 
+
+## v18 (2026-10-19)
+- F11 gun damage menu: rows = last gun fired (creates a [Weapons] entry on first change), the five groups, every [Weapons] entry. Left/Right steps TMP < handgun < Red9 < Blacktail < Chicago < Broken Butterfly; applies live, saved to the INI.
+

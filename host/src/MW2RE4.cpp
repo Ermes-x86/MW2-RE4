@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v17 (per-gun damage overrides: AK-47 and M4 Red9)";
+constexpr const char* kVersion = "MW2RE4 v18 (F11 gun damage menu)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -337,8 +337,10 @@ std::vector<CatalogEntry> g_catalogAll; // everything MW2 sent, for naming shots
 uint32_t g_catalogSource = 0;          // MW2 catalog size the filtered list was built from
 bool g_weaponMenu = false;
 bool g_settingsMenu = false;
+bool g_damageMenu = false;
+int g_damageRow = 0;
 int g_settingsRow = 0;
-bool MenuOpen() { return g_weaponMenu || g_settingsMenu; }
+bool MenuOpen() { return g_weaponMenu || g_settingsMenu || g_damageMenu; }
 size_t g_selected = 0;
 uint32_t g_request = 0, g_requestKind = 0, g_requestWeapon = 0;
 std::string g_notice;
@@ -743,6 +745,7 @@ bool StartsWithAny(const char* name, std::initializer_list<const char*> prefixes
 }
 
 // The RE4 weapon whose damage and enemy reactions fit the MW2 weapon best. RE4 computes the damage.
+std::string g_lastGun; // MW2 gun last fired, e.g. "ak47", for the damage menu
 int Re4WeaponFor(const char* name, float rangeMetres)
 {
     if (rangeMetres < 3.f)
@@ -863,6 +866,8 @@ void ResolveShots(uint8_t* pl)
         float range = std::clamp(sh.range, 1.f, 100.f);
         float endH[3] = { sh.origin[0] + d[0] / len * range, sh.origin[1] + d[1] / len * range, sh.origin[2] + d[2] / len * range };
         const char* name = WeaponName(sh.weapon);
+        if (sh.range >= 3.f && name[0])
+            g_lastGun = std::string(name, strcspn(name, "_"));
         int weapon = Re4WeaponFor(name, sh.range);
         int hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
         ++g_hitsSent;
@@ -1192,21 +1197,140 @@ std::string SettingsText()
     return t;
 }
 
+// ---------------------------------------------------------------- damage menu (F11)
+// Each MW2 gun borrows an RE4 gun's damage. Left/Right steps through RE4's guns from weakest to strongest.
+struct DamageLevel { int weapon; const char* name; };
+const DamageLevel kDamageLevels[] = {
+    { 0x0B, "TMP" }, { 0x01, "Handgun" }, { 0x03, "Red9" }, { 0x04, "Blacktail" },
+    { 0x0C, "Chicago Typewriter" }, { 0x02, "Broken Butterfly" },
+};
+constexpr int kDamageLevelCount = sizeof(kDamageLevels) / sizeof(kDamageLevels[0]);
+
+int DamageLevelIndex(int weapon)
+{
+    for (int i = 0; i < kDamageLevelCount; ++i)
+        if (kDamageLevels[i].weapon == weapon)
+            return i;
+    return 1; // anything else shows as handgun
+}
+
+int* GunOverride(const std::string& gun);
+struct DamageRow { std::string label, gun; int* value; }; // gun set = per-gun [Weapons] entry
+std::vector<DamageRow> DamageRows()
+{
+    std::vector<DamageRow> rows;
+    if (!g_lastGun.empty())
+        rows.push_back({ "LAST GUN FIRED: " + g_lastGun, g_lastGun, GunOverride(g_lastGun) });
+    rows.push_back({ "PISTOLS", "", &g_cfg.pistolWeapon });
+    rows.push_back({ "MACHINE PISTOLS", "", &g_cfg.machinePistolWeapon });
+    rows.push_back({ "SMGS", "", &g_cfg.smgWeapon });
+    rows.push_back({ "MAGNUMS", "", &g_cfg.magnumWeapon });
+    rows.push_back({ "ASSAULT RIFLES", "", &g_cfg.rifleWeapon });
+    for (auto& [gun, weapon] : g_cfg.gunWeapon)
+        rows.push_back({ "  " + gun, gun, &weapon });
+    return rows;
+}
+
+int* GunOverride(const std::string& gun)
+{
+    for (auto& [name, weapon] : g_cfg.gunWeapon)
+        if (name == gun)
+            return &weapon;
+    return nullptr;
+}
+
+void DamageInput(bool up, bool down, bool left, bool right, bool back)
+{
+    auto rows = DamageRows();
+    int n = (int)rows.size();
+    g_damageRow = std::clamp(g_damageRow, 0, n - 1);
+    if (up) g_damageRow = (g_damageRow + n - 1) % n;
+    if (down) g_damageRow = (g_damageRow + 1) % n;
+    if (back) g_damageMenu = false;
+    int dir = right ? 1 : left ? -1 : 0;
+    if (!dir)
+        return;
+    DamageRow& row = rows[g_damageRow];
+    int* value = row.value;
+    if (!row.gun.empty() && !value)
+    {
+        // first change to the last fired gun: it gets its own entry, starting from its current damage
+        std::string full = row.gun + "_mp";
+        g_cfg.gunWeapon.push_back({ row.gun, Re4WeaponFor(full.c_str(), 100.f) });
+        value = &g_cfg.gunWeapon.back().second;
+    }
+    int i = std::clamp(DamageLevelIndex(*value) + dir, 0, kDamageLevelCount - 1);
+    *value = kDamageLevels[i].weapon;
+    char path[MAX_PATH], text[16];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    snprintf(text, sizeof(text), "%d", *value);
+    if (!row.gun.empty())
+        WritePrivateProfileStringA("Weapons", row.gun.c_str(), text, path);
+    else
+    {
+        static const char* keys[] = { "PistolWeapon", "MachinePistolWeapon", "SmgWeapon", "MagnumWeapon", "RifleWeapon" };
+        int* fields[] = { &g_cfg.pistolWeapon, &g_cfg.machinePistolWeapon, &g_cfg.smgWeapon, &g_cfg.magnumWeapon,
+                          &g_cfg.rifleWeapon };
+        for (int k = 0; k < 5; ++k)
+            if (fields[k] == value)
+                WritePrivateProfileStringA("MW2RE4", keys[k], text, path);
+    }
+    Log("damage: %s -> RE4 %s (0x%02X)", row.label.c_str(), kDamageLevels[i].name, *value);
+}
+
+std::string DamageText()
+{
+    auto rows = DamageRows();
+    std::string t = "GUN DAMAGE   Up/Down select   Left/Right weaker/stronger   F11 close\n"
+                    "(each MW2 gun hits like the RE4 gun named)\n\n";
+    for (int r = 0; r < (int)rows.size(); ++r)
+    {
+        int* value = rows[r].value;
+        int weapon = value ? *value : Re4WeaponFor((rows[r].gun + "_mp").c_str(), 100.f);
+        if (!value && rows[r].gun.size())
+            if (int* o = GunOverride(rows[r].gun))
+                weapon = *o;
+        int i = DamageLevelIndex(weapon);
+        std::string bar = "[";
+        for (int k = 0; k < kDamageLevelCount; ++k)
+            bar += k <= i ? "||||" : "....";
+        bar += "]";
+        char line[200];
+        snprintf(line, sizeof(line), "%s%-30s %s  %s\n", r == g_damageRow ? "> " : "   ", rows[r].label.c_str(),
+                 bar.c_str(), kDamageLevels[i].name);
+        t += line;
+    }
+    return t;
+}
+
 void WeaponMenuInput(bool focused)
 {
     bool f8 = Edge(VK_F8), f9 = Edge(VK_F9), up = Edge(VK_UP), down = Edge(VK_DOWN), left = Edge(VK_LEFT),
-         right = Edge(VK_RIGHT), enter = Edge(VK_RETURN), esc = Edge(VK_BACK), f10 = Edge(VK_F10);
+         right = Edge(VK_RIGHT), enter = Edge(VK_RETURN), esc = Edge(VK_BACK), f10 = Edge(VK_F10),
+         f11 = Edge(VK_F11);
     InfiniteAmmo();
     if (!g_active || !focused)
     {
         g_weaponMenu = false;
         g_settingsMenu = false;
+        g_damageMenu = false;
         return;
     }
     if (f10)
     {
         g_settingsMenu = !g_settingsMenu;
-        g_weaponMenu = false;
+        g_weaponMenu = g_damageMenu = false;
+    }
+    if (f11)
+    {
+        g_damageMenu = !g_damageMenu;
+        g_weaponMenu = g_settingsMenu = false;
+    }
+    if (g_damageMenu)
+    {
+        DamageInput(up, down, left, right, esc);
+        f8 = false;
+        up = down = left = right = enter = esc = false;
     }
     if (g_settingsMenu)
     {
@@ -1214,6 +1338,8 @@ void WeaponMenuInput(bool focused)
         f8 = false;
         up = down = left = right = enter = esc = false;
     }
+    if (f8)
+        g_damageMenu = false;
     if (f8)
     {
         g_weaponMenu = !g_weaponMenu && !g_catalog.empty();
@@ -1800,7 +1926,7 @@ struct TextTexture
     IDirect3DTexture9* texture = nullptr;
     UINT width = 0, height = 0;
 };
-TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText;
+TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText, g_damageText;
 
 void ReleaseText(TextTexture& t)
 {
@@ -1910,6 +2036,7 @@ const char* kHelp =
     "V  melee          E  use: doors, items\n"
     "F8  weapon menu   F9  refill ammo\n"
     "F10  settings: FOV, mouse, ammo, skin\n"
+    "F11  gun damage\n"
     "U  UAV radar (shows Ganados)\n"
     "RE4 inventory, map and menu keys work\n"
     "F6  MW2 on / off";
@@ -2125,6 +2252,8 @@ void DrawOverlay(IDirect3DDevice9* device)
                 Quad(device, cx + dot.right * scale - d / 2, cy - dot.forward * scale - d / 2, d, d, 0xffff3030);
             Quad(device, cx - d / 2, cy - d / 2, d, d, 0xffffff60);
         }
+        if (drawMw2 && g_damageMenu && UpdateText(device, g_damageText, DamageText(), (int)(textPx * 1.05f)))
+            DrawPanel(device, g_damageText, (w - g_damageText.width) / 2, h * .12f, 0xfff0f0f0);
         if (drawMw2 && g_settingsMenu && UpdateText(device, g_settingsText, SettingsText(), (int)(textPx * 1.15f)))
             DrawPanel(device, g_settingsText, (w - g_settingsText.width) / 2, h * .22f, 0xfff0f0f0);
         if (drawMw2 && g_weaponMenu && UpdateText(device, g_menuText, WeaponMenuText(), (int)(textPx * 1.15f)))
