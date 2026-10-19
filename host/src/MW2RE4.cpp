@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v18 (F11 gun damage menu)";
+constexpr const char* kVersion = "MW2RE4 v19 (F11 damage sliders per gun class)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -72,17 +72,11 @@ struct Settings
     int invertMouseY = 0;
     int showControls = 1;
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
-    int rifleWeapon = 0x01; // RE4 weapon whose damage MW2 assault rifles and LMGs use (1 = handgun; was Chicago 0x0C)
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
-    // RE4 weapon whose damage each MW2 gun group uses (RE4 base damage: TMP 0.4, handgun 1.0, Red9 1.4,
-    // Blacktail 1.6, Chicago 10, Broken Butterfly 13)
-    int pistolWeapon = 0x01;        // usp, beretta: handgun
-    int machinePistolWeapon = 0x0B; // glock, beretta393, pp2000, tmp: TMP
-    int smgWeapon = 0x01;           // mp5k, ump45, kriss, p90, uzi: handgun (was TMP)
-    int magnumWeapon = 0x03;        // deserteagle, coltanaconda: Red9 (was Broken Butterfly, one-shot kills)
+    // Damage multiplier per MW2 gun class (F11), applied to the damage RE4 computes for the class's RE4 gun
+    float damage[6] = { 1.0f, 2.0f, 0.8f, 1.4f, 1.0f, 1.0f };
     int uavSeconds = 30, uavCooldown = 60;
-    std::vector<std::pair<std::string, int>> gunWeapon; // [Weapons] name=RE4 weapon, overrides the groups
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
 } g_cfg;
@@ -133,30 +127,16 @@ void LoadSettings()
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
     g_cfg.promptRaise = IniFloat(path, "PromptRaise", g_cfg.promptRaise);
     g_cfg.messageRaise = IniFloat(path, "MessageRaise", g_cfg.messageRaise);
-    auto weaponKey = [&](const char* key, int& v) { v = std::clamp((int)GetPrivateProfileIntA("MW2RE4", key, v, path), 0x01, 0x21); };
-    weaponKey("PistolWeapon", g_cfg.pistolWeapon);
-    weaponKey("MachinePistolWeapon", g_cfg.machinePistolWeapon);
-    weaponKey("SmgWeapon", g_cfg.smgWeapon);
-    weaponKey("MagnumWeapon", g_cfg.magnumWeapon);
     g_cfg.uavSeconds = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavSeconds", g_cfg.uavSeconds, path), 5, 600);
     g_cfg.uavCooldown = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavCooldown", g_cfg.uavCooldown, path), 0, 600);
+    for (int i = 0; i < 6; ++i)
     {
-        char section[4096] = {};
-        DWORD n = GetPrivateProfileSectionA("Weapons", section, sizeof(section), path);
-        g_cfg.gunWeapon.clear();
-        for (const char* line = section; n && *line; line += strlen(line) + 1)
-        {
-            const char* eq = strchr(line, '=');
-            if (!eq || line[0] == ';')
-                continue;
-            int v = atoi(eq + 1);
-            if (v >= 0x01 && v <= 0x21)
-                g_cfg.gunWeapon.push_back({ std::string(line, eq), v });
-        }
+        char key[16];
+        snprintf(key, sizeof(key), "Damage%d", i);
+        g_cfg.damage[i] = std::clamp(IniFloat(path, key, g_cfg.damage[i]), .1f, 5.f);
     }
     g_cfg.infiniteAmmo = GetPrivateProfileIntA("MW2RE4", "InfiniteAmmo", g_cfg.infiniteAmmo, path);
     g_cfg.skin = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "Skin", g_cfg.skin, path), 0, kSkinCount - 1);
-    g_cfg.rifleWeapon = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "RifleWeapon", g_cfg.rifleWeapon, path), 0x01, 0x21);
     Log("settings: RuntimeDir=%s RuntimeExecutable=%s RuntimeSettings=%s MappingName=%s ToggleKey=0x%X FOV=%.1f "
         "UnitsPerMeter=%.1f MouseScale=%.2f CollisionRadius=%.1f HideLeon=%d InvertMouseY=%d",
         g_cfg.runtimeDir.c_str(), g_cfg.runtimeExe.c_str(), g_cfg.settingsFile.c_str(), g_cfg.mappingName.c_str(),
@@ -744,39 +724,74 @@ bool StartsWithAny(const char* name, std::initializer_list<const char*> prefixes
     return false;
 }
 
-// The RE4 weapon whose damage and enemy reactions fit the MW2 weapon best. RE4 computes the damage.
-std::string g_lastGun; // MW2 gun last fired, e.g. "ak47", for the damage menu
-int Re4WeaponFor(const char* name, float rangeMetres)
+// MW2 gun classes (F11 sliders). Each class hits through the RE4 gun whose reactions fit (shotgun knockback,
+// rifle hits); its damage is then scaled by the class's slider in LifeDownHook.
+enum GunClass { GC_PISTOL, GC_TOUGH_PISTOL, GC_SMG, GC_RIFLE, GC_SHOTGUN, GC_SNIPER, GC_COUNT, GC_OTHER = GC_COUNT };
+const char* kGunClassNames[GC_COUNT] = { "NORMAL PISTOLS", "TOUGH PISTOLS", "SMGS", "ASSAULT RIFLES", "12 GAUGE",
+                                         "SNIPERS" };
+const char* kGunClassHint[GC_COUNT] = { "USP, M9", "Desert Eagle, .44 Magnum", "UMP, P90, Vector, Glock...",
+                                        "AK-47, M4, SCAR, AUG, RPD...", "SPAS-12, Striker, AA-12...",
+                                        "Intervention, Barrett, WA2000, M21" };
+
+struct GunFit { int weapon; int gunClass; };
+GunFit Re4WeaponFor(const char* name, float rangeMetres)
 {
     if (rangeMetres < 3.f)
-        return re4::WEP_KNIFE; // MW2 melee
-    // [Weapons] in the INI: one gun by name ("ak47" matches ak47_mp, ak47_acog_mp, ...)
-    for (auto& [gun, weapon] : g_cfg.gunWeapon)
-    {
-        size_t n = gun.size();
-        if (!strncmp(name, gun.c_str(), n) && (name[n] == 0 || name[n] == '_'))
-            return weapon;
-    }
+        return { re4::WEP_KNIFE, GC_OTHER }; // MW2 melee
     if (StartsWithAny(name, { "deserteagle", "coltanaconda" }))
-        return g_cfg.magnumWeapon;
-    if (StartsWithAny(name, { "glock", "beretta393", "pp2000", "tmp" }))
-        return g_cfg.machinePistolWeapon;
-    if (StartsWithAny(name, { "mp5k", "ump45", "kriss", "p90", "uzi" }))
-        return g_cfg.smgWeapon;
+        return { re4::WEP_HANDGUN, GC_TOUGH_PISTOL };
+    if (StartsWithAny(name, { "glock", "beretta393", "pp2000", "tmp", "mp5k", "ump45", "kriss", "p90", "uzi" }))
+        return { re4::WEP_HANDGUN, GC_SMG };
     if (StartsWithAny(name, { "ak47", "m4", "famas", "fal", "scar", "tavor", "fn2000", "masada", "m16", "aug", "rpd",
                               "sa80", "mg4", "m240" }))
-        return g_cfg.rifleWeapon; // the Chicago Typewriter killed Ganados in one shot at MW2's fire rate
+        return { re4::WEP_HANDGUN, GC_RIFLE };
     if (StartsWithAny(name, { "cheytac" }))
-        return re4::WEP_RIFLE_BOLT;
+        return { re4::WEP_RIFLE_BOLT, GC_SNIPER };
     if (StartsWithAny(name, { "barrett", "wa2000", "m21" }))
-        return re4::WEP_RIFLE_SEMI;
+        return { re4::WEP_RIFLE_SEMI, GC_SNIPER };
     if (StartsWithAny(name, { "striker", "aa12" }))
-        return re4::WEP_STRIKER;
+        return { re4::WEP_STRIKER, GC_SHOTGUN };
     if (StartsWithAny(name, { "spas12", "ranger", "model1887", "m1014" }))
-        return re4::WEP_SHOTGUN;
+        return { re4::WEP_SHOTGUN, GC_SHOTGUN };
     if (StartsWithAny(name, { "rpg", "at4", "m79" }))
-        return re4::WEP_RPG;
-    return g_cfg.pistolWeapon; // beretta, usp and anything unknown
+        return { re4::WEP_RPG, GC_OTHER };
+    return { re4::WEP_HANDGUN, GC_PISTOL }; // beretta, usp and anything unknown
+}
+
+// Damage scaling: an MW2 bullet that hit sets the scale; the enemy applies the hit within a few frames.
+volatile float g_hitScale = 1.f;
+volatile DWORD g_hitScaleUntil = 0;
+void* g_lifeDownOrig = nullptr;
+int __cdecl ScaleDamage(uint8_t* em, int damage)
+{
+    if (!g_active || GetTickCount() > g_hitScaleUntil || damage <= 0)
+        return damage;
+    __try
+    {
+        if (!em || At<uint8_t>(em, re4::Model_id) == 0) // Leon
+            return damage;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return damage;
+    }
+    int scaled = std::max(1, (int)std::lround(damage * g_hitScale));
+    static int logged = 0;
+    if (logged < 30 && ++logged)
+        Log("damage: enemy %p %d -> %d (x%.1f)", (void*)em, damage, scaled, (float)g_hitScale);
+    return scaled;
+}
+
+__declspec(naked) void LifeDownHook()
+{
+    __asm {
+        push dword ptr [esp + 8]   // damage
+        push dword ptr [esp + 8]   // em (shifted by the push above)
+        call ScaleDamage
+        add esp, 8
+        mov dword ptr [esp + 8], eax
+        jmp dword ptr [g_lifeDownOrig]
+    }
 }
 
 int CallBulletHit(uint8_t* pl, Vec3 start, Vec3 end, int weapon)
@@ -866,10 +881,14 @@ void ResolveShots(uint8_t* pl)
         float range = std::clamp(sh.range, 1.f, 100.f);
         float endH[3] = { sh.origin[0] + d[0] / len * range, sh.origin[1] + d[1] / len * range, sh.origin[2] + d[2] / len * range };
         const char* name = WeaponName(sh.weapon);
-        if (sh.range >= 3.f && name[0])
-            g_lastGun = std::string(name, strcspn(name, "_"));
-        int weapon = Re4WeaponFor(name, sh.range);
+        GunFit fit = Re4WeaponFor(name, sh.range);
+        int weapon = fit.weapon;
         int hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
+        if (hits > 0)
+        {
+            g_hitScale = fit.gunClass < GC_COUNT ? g_cfg.damage[fit.gunClass] : 1.f;
+            g_hitScaleUntil = GetTickCount() + 400;
+        }
         ++g_hitsSent;
         static uint32_t logged = 0;
         if (logged < 40 || hits > 0)
@@ -889,6 +908,7 @@ void ResolveShots(uint8_t* pl)
         // Exactly what RE4's own hand grenade / flash grenade does when it goes off: effect, sound, status flags,
         // then the attack-hit routine in blast mode (no attacker, start == end, radius).
         Vec3 c = ToRe4(e.origin);
+        g_hitScaleUntil = 0; // RE4's own grenade damage
         int hits = RE4Explosion(c, flash);
         ++g_blastsSent;
         Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s, BulletHit returned %d", e.sequence,
@@ -1198,109 +1218,52 @@ std::string SettingsText()
 }
 
 // ---------------------------------------------------------------- damage menu (F11)
-// Each MW2 gun borrows an RE4 gun's damage. Left/Right steps through RE4's guns from weakest to strongest.
-struct DamageLevel { int weapon; const char* name; };
-const DamageLevel kDamageLevels[] = {
-    { 0x0B, "TMP" }, { 0x01, "Handgun" }, { 0x03, "Red9" }, { 0x04, "Blacktail" },
-    { 0x0C, "Chicago Typewriter" }, { 0x02, "Broken Butterfly" },
-};
-constexpr int kDamageLevelCount = sizeof(kDamageLevels) / sizeof(kDamageLevels[0]);
-
-int DamageLevelIndex(int weapon)
-{
-    for (int i = 0; i < kDamageLevelCount; ++i)
-        if (kDamageLevels[i].weapon == weapon)
-            return i;
-    return 1; // anything else shows as handgun
-}
-
-int* GunOverride(const std::string& gun);
-struct DamageRow { std::string label, gun; int* value; }; // gun set = per-gun [Weapons] entry
-std::vector<DamageRow> DamageRows()
-{
-    std::vector<DamageRow> rows;
-    if (!g_lastGun.empty())
-        rows.push_back({ "LAST GUN FIRED: " + g_lastGun, g_lastGun, GunOverride(g_lastGun) });
-    rows.push_back({ "PISTOLS", "", &g_cfg.pistolWeapon });
-    rows.push_back({ "MACHINE PISTOLS", "", &g_cfg.machinePistolWeapon });
-    rows.push_back({ "SMGS", "", &g_cfg.smgWeapon });
-    rows.push_back({ "MAGNUMS", "", &g_cfg.magnumWeapon });
-    rows.push_back({ "ASSAULT RIFLES", "", &g_cfg.rifleWeapon });
-    for (auto& [gun, weapon] : g_cfg.gunWeapon)
-        rows.push_back({ "  " + gun, gun, &weapon });
-    return rows;
-}
-
-int* GunOverride(const std::string& gun)
-{
-    for (auto& [name, weapon] : g_cfg.gunWeapon)
-        if (name == gun)
-            return &weapon;
-    return nullptr;
-}
-
+// One slider per MW2 gun class: further right = more damage (x0.1 to x5.0 of the class's normal hit).
+// Left/Right held down repeats.
 void DamageInput(bool up, bool down, bool left, bool right, bool back)
 {
-    auto rows = DamageRows();
-    int n = (int)rows.size();
-    g_damageRow = std::clamp(g_damageRow, 0, n - 1);
-    if (up) g_damageRow = (g_damageRow + n - 1) % n;
-    if (down) g_damageRow = (g_damageRow + 1) % n;
+    if (up) g_damageRow = (g_damageRow + GC_COUNT - 1) % GC_COUNT;
+    if (down) g_damageRow = (g_damageRow + 1) % GC_COUNT;
     if (back) g_damageMenu = false;
+    static DWORD heldSince = 0, lastRepeat = 0;
+    DWORD now = GetTickCount();
+    bool l = Down(VK_LEFT), r = Down(VK_RIGHT);
     int dir = right ? 1 : left ? -1 : 0;
+    if (dir)
+        heldSince = lastRepeat = now;
+    else if ((l || r) && now - heldSince > 350 && now - lastRepeat > 50)
+    {
+        dir = r ? 1 : -1;
+        lastRepeat = now;
+    }
+    if (!l && !r)
+        heldSince = 0;
     if (!dir)
         return;
-    DamageRow& row = rows[g_damageRow];
-    int* value = row.value;
-    if (!row.gun.empty() && !value)
-    {
-        // first change to the last fired gun: it gets its own entry, starting from its current damage
-        std::string full = row.gun + "_mp";
-        g_cfg.gunWeapon.push_back({ row.gun, Re4WeaponFor(full.c_str(), 100.f) });
-        value = &g_cfg.gunWeapon.back().second;
-    }
-    int i = std::clamp(DamageLevelIndex(*value) + dir, 0, kDamageLevelCount - 1);
-    *value = kDamageLevels[i].weapon;
-    char path[MAX_PATH], text[16];
-    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
-    snprintf(text, sizeof(text), "%d", *value);
-    if (!row.gun.empty())
-        WritePrivateProfileStringA("Weapons", row.gun.c_str(), text, path);
-    else
-    {
-        static const char* keys[] = { "PistolWeapon", "MachinePistolWeapon", "SmgWeapon", "MagnumWeapon", "RifleWeapon" };
-        int* fields[] = { &g_cfg.pistolWeapon, &g_cfg.machinePistolWeapon, &g_cfg.smgWeapon, &g_cfg.magnumWeapon,
-                          &g_cfg.rifleWeapon };
-        for (int k = 0; k < 5; ++k)
-            if (fields[k] == value)
-                WritePrivateProfileStringA("MW2RE4", keys[k], text, path);
-    }
-    Log("damage: %s -> RE4 %s (0x%02X)", row.label.c_str(), kDamageLevels[i].name, *value);
+    float& v = g_cfg.damage[g_damageRow];
+    v = std::clamp(std::round((v + dir * .1f) * 10.f) / 10.f, .1f, 5.f);
+    char key[16];
+    snprintf(key, sizeof(key), "Damage%d", g_damageRow);
+    SaveSetting(key, "%.1f", v);
 }
 
 std::string DamageText()
 {
-    auto rows = DamageRows();
-    std::string t = "GUN DAMAGE   Up/Down select   Left/Right weaker/stronger   F11 close\n"
-                    "(each MW2 gun hits like the RE4 gun named)\n\n";
-    for (int r = 0; r < (int)rows.size(); ++r)
+    std::string t = "GUN DAMAGE   Up/Down select   Left/Right less/more   F11 close\n\n";
+    for (int r = 0; r < GC_COUNT; ++r)
     {
-        int* value = rows[r].value;
-        int weapon = value ? *value : Re4WeaponFor((rows[r].gun + "_mp").c_str(), 100.f);
-        if (!value && rows[r].gun.size())
-            if (int* o = GunOverride(rows[r].gun))
-                weapon = *o;
-        int i = DamageLevelIndex(weapon);
+        float v = g_cfg.damage[r];
+        int n = (int)std::lround(v / 5.f * 25.f);
         std::string bar = "[";
-        for (int k = 0; k < kDamageLevelCount; ++k)
-            bar += k <= i ? "||||" : "....";
+        for (int k = 0; k < 25; ++k)
+            bar += k < n ? '|' : '.';
         bar += "]";
-        char line[200];
-        snprintf(line, sizeof(line), "%s%-30s %s  %s\n", r == g_damageRow ? "> " : "   ", rows[r].label.c_str(),
-                 bar.c_str(), kDamageLevels[i].name);
+        char line[256];
+        snprintf(line, sizeof(line), "%s%s  %s  x%.1f\n      %s\n", r == g_damageRow ? "> " : "   ", kGunClassNames[r],
+                 bar.c_str(), v, kGunClassHint[r]);
         t += line;
     }
-    return t;
+    return t + "\nx1.0 = normal RE4 hit for the class (pistols, SMGs, rifles: handgun)";
 }
 
 void WeaponMenuInput(bool focused)
@@ -2423,6 +2386,22 @@ bool Init()
     }
     if (uint8_t* q = Find(m, re4::kQteActive))
         g_qteActive = *(uint8_t**)q;
+    if (uint8_t* ld = Find(m, re4::kLifeDown))
+    {
+        // the JMP thunk all callers use
+        uint8_t* text = m.code.empty() ? nullptr : m.code[0].begin;
+        uint8_t* thunk = nullptr;
+        for (size_t i = 0; text && i + 5 < 0x10000; ++i)
+            if (text[i] == 0xE9 && text + i + 5 + *(int32_t*)(text + i + 1) == ld)
+            {
+                thunk = text + i;
+                break;
+            }
+        if (thunk && HookThunk(thunk, (void*)&LifeDownHook, &g_lifeDownOrig))
+            Log("damage sliders: LifeDownSet2 hooked at thunk 0x%p", (void*)thunk);
+        else
+            Log("damage sliders: LifeDownSet2 thunk not found; sliders have no effect");
+    }
     if (uint8_t* ms = Find(m, re4::kMesSetCall))
     {
         uint8_t* thunk = ms[0] == 0xE8 ? ms + 5 + *(int32_t*)(ms + 1) : nullptr;

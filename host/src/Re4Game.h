@@ -133,6 +133,9 @@ namespace re4
     // 0 caption ("Will you use the emblem?"), 1 action button, 2 inventory, 5 system. py is screen y (down).
     constexpr Pattern kMesSetCall { "MesSet call", "68 84 00 02 00 51 53", 13, false };
     constexpr uint8_t IDC_MSG_WINDOW = 0x2F;
+    // LifeDownSet2(cEm* em, int damage, int random, ...) __cdecl: subtracts damage from an enemy (or Leon, model id 0).
+    // Called through a JMP thunk; the hook scales `damage` ([esp+8] on entry).
+    constexpr Pattern kLifeDown   { "LifeDownSet2", "55 8B EC 53 56 57 E8 ? ? ? ? 0F B6 F0 C1 E6 08 E8 ? ? ? ? 8B 4D 10 8B 7D 0C", 0, false };
     // QTE active byte (QTEFixes.cpp): RE4 is showing a quick-time button prompt
     constexpr Pattern kQteActive  { "QTE active", "C6 05 ? ? ? ? ? E8 ? ? ? ? 83 C4 ? 84 C0 0F 84", 2, false };
     // IDSystem (RE4's 2D interface): m_maxId at +0, ID_UNIT array at +0x50 (Game.cpp, SDK/ID.h)

@@ -127,3 +127,7 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 ## v18 (2026-10-19)
 - F11 gun damage menu: rows = last gun fired (creates a [Weapons] entry on first change), the five groups, every [Weapons] entry. Left/Right steps TMP < handgun < Red9 < Blacktail < Chicago < Broken Butterfly; applies live, saved to the INI.
 
+
+## v19 (2026-10-19)
+- F11 now = damage multiplier sliders per gun class (normal pistols, tough pistols, SMGs, assault rifles incl. LMGs, 12 gauge, snipers), x0.1-x5.0, INI Damage0..5. Classes hit through a fixed RE4 gun (handgun; shotgun/Striker; bolt/semi rifle) for reactions; LifeDownSet2's JMP thunk (0x4071C1, pattern kLifeDown) is hooked with a naked stub that scales the damage arg for enemies (model id != 0) for 400 ms after an MW2 bullet hit; grenades reset it. [Weapons] and the *Weapon keys were removed (old INI kept as builds\MW2RE4.ini.before-v19.bak).
+
