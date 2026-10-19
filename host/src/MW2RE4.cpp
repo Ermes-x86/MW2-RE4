@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v16 (balanced pistols/SMGs/magnums, UAV radar)";
+constexpr const char* kVersion = "MW2RE4 v17 (per-gun damage overrides: AK-47 and M4 Red9)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -82,6 +82,7 @@ struct Settings
     int smgWeapon = 0x01;           // mp5k, ump45, kriss, p90, uzi: handgun (was TMP)
     int magnumWeapon = 0x03;        // deserteagle, coltanaconda: Red9 (was Broken Butterfly, one-shot kills)
     int uavSeconds = 30, uavCooldown = 60;
+    std::vector<std::pair<std::string, int>> gunWeapon; // [Weapons] name=RE4 weapon, overrides the groups
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
 } g_cfg;
@@ -139,6 +140,20 @@ void LoadSettings()
     weaponKey("MagnumWeapon", g_cfg.magnumWeapon);
     g_cfg.uavSeconds = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavSeconds", g_cfg.uavSeconds, path), 5, 600);
     g_cfg.uavCooldown = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavCooldown", g_cfg.uavCooldown, path), 0, 600);
+    {
+        char section[4096] = {};
+        DWORD n = GetPrivateProfileSectionA("Weapons", section, sizeof(section), path);
+        g_cfg.gunWeapon.clear();
+        for (const char* line = section; n && *line; line += strlen(line) + 1)
+        {
+            const char* eq = strchr(line, '=');
+            if (!eq || line[0] == ';')
+                continue;
+            int v = atoi(eq + 1);
+            if (v >= 0x01 && v <= 0x21)
+                g_cfg.gunWeapon.push_back({ std::string(line, eq), v });
+        }
+    }
     g_cfg.infiniteAmmo = GetPrivateProfileIntA("MW2RE4", "InfiniteAmmo", g_cfg.infiniteAmmo, path);
     g_cfg.skin = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "Skin", g_cfg.skin, path), 0, kSkinCount - 1);
     g_cfg.rifleWeapon = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "RifleWeapon", g_cfg.rifleWeapon, path), 0x01, 0x21);
@@ -732,6 +747,13 @@ int Re4WeaponFor(const char* name, float rangeMetres)
 {
     if (rangeMetres < 3.f)
         return re4::WEP_KNIFE; // MW2 melee
+    // [Weapons] in the INI: one gun by name ("ak47" matches ak47_mp, ak47_acog_mp, ...)
+    for (auto& [gun, weapon] : g_cfg.gunWeapon)
+    {
+        size_t n = gun.size();
+        if (!strncmp(name, gun.c_str(), n) && (name[n] == 0 || name[n] == '_'))
+            return weapon;
+    }
     if (StartsWithAny(name, { "deserteagle", "coltanaconda" }))
         return g_cfg.magnumWeapon;
     if (StartsWithAny(name, { "glock", "beretta393", "pp2000", "tmp" }))

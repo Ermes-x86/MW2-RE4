@@ -119,3 +119,7 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 - Damage groups via INI: PistolWeapon 1 (usp, beretta), MachinePistolWeapon 11 TMP (glock, beretta393, pp2000, tmp), SmgWeapon 1 handgun (mp5k, ump45, kriss, p90, uzi; was TMP), MagnumWeapon 3 Red9 (deagle, anaconda; was Broken Butterfly).
 - UAV radar (U): MW2's UAV can't see RE4 enemies, so an overlay radar top right draws live EmMgr enemies within 50 m relative to Leon's facing, UavSeconds 30 / UavCooldown 60. Left/right orientation derived on paper (host right-handed); unverified.
 
+
+## v17 (2026-10-19)
+- [Weapons] INI section: per-gun RE4 weapon (name prefix up to '_'), checked before the groups. Defaults ak47=3, m4=3 (Red9). Other rifles/LMGs stay RifleWeapon=1 (handgun; the log already showed 0x01 for m240, the user thought they used TMP).
+
