@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v19 (F11 damage sliders per gun class)";
+constexpr const char* kVersion = "MW2RE4 v20 (RE4 attache case guns and ammo, MW2 never dies)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -75,7 +75,8 @@ struct Settings
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
     // Damage multiplier per MW2 gun class (F11), applied to the damage RE4 computes for the class's RE4 gun
-    float damage[6] = { 1.0f, 2.0f, 0.8f, 1.4f, 1.0f, 1.0f };
+    float damage[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    int re4Inventory = 1;      // MW2's gun and ammo come from Leon's attache case (0 = MW2's own, F8 menu)
     int uavSeconds = 30, uavCooldown = 60;
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
@@ -136,6 +137,7 @@ void LoadSettings()
         g_cfg.damage[i] = std::clamp(IniFloat(path, key, g_cfg.damage[i]), .1f, 5.f);
     }
     g_cfg.infiniteAmmo = GetPrivateProfileIntA("MW2RE4", "InfiniteAmmo", g_cfg.infiniteAmmo, path);
+    g_cfg.re4Inventory = GetPrivateProfileIntA("MW2RE4", "Re4Inventory", g_cfg.re4Inventory, path);
     g_cfg.skin = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "Skin", g_cfg.skin, path), 0, kSkinCount - 1);
     Log("settings: RuntimeDir=%s RuntimeExecutable=%s RuntimeSettings=%s MappingName=%s ToggleKey=0x%X FOV=%.1f "
         "UnitsPerMeter=%.1f MouseScale=%.2f CollisionRadius=%.1f HideLeon=%d InvertMouseY=%d",
@@ -323,6 +325,8 @@ int g_settingsRow = 0;
 bool MenuOpen() { return g_weaponMenu || g_settingsMenu || g_damageMenu; }
 size_t g_selected = 0;
 uint32_t g_request = 0, g_requestKind = 0, g_requestWeapon = 0;
+int32_t g_requestClip = 0, g_requestStock = 0;
+DWORD g_requestTime = 0;
 std::string g_notice;
 DWORD g_noticeUntil = 0;
 bool g_prevKeys[256]{};
@@ -400,6 +404,7 @@ bool StartRuntime()
         return false;
     }
     SetEnvironmentVariableW(L"IW4L_GTA_BRIDGE", Wide(g_cfg.mappingName).c_str());
+    SetEnvironmentVariableW(L"IW4L_RE4_BRIDGE", L"1"); // runtime: god mode, RE4 owns guns and ammo
     SetEnvironmentVariableW(L"WGPU_BACKEND", L"dx12");
     SetEnvironmentVariableW(L"IW4L_PRESENT_MODE", L"AutoNoVsync");
     SetEnvironmentVariableW(L"IW4L_SETTINGS_PATH", (root + L"\\" + Wide(g_cfg.settingsFile)).c_str());
@@ -417,6 +422,7 @@ bool StartRuntime()
     bool okay = CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
                                root.c_str(), &startup, &g_child) != 0;
     SetEnvironmentVariableW(L"IW4L_GTA_BRIDGE", nullptr);
+    SetEnvironmentVariableW(L"IW4L_RE4_BRIDGE", nullptr);
     if (okay)
     {
         g_runtimeStarted = GetTickCount();
@@ -862,6 +868,7 @@ int RE4Explosion(Vec3 pos, bool flash)
     }
 }
 
+int ArsenalWeaponNo(uint32_t mw2Weapon);
 void ResolveShots(uint8_t* pl)
 {
     uint32_t shots = g_pendingShots, blasts = g_pendingBlasts;
@@ -882,6 +889,9 @@ void ResolveShots(uint8_t* pl)
         float endH[3] = { sh.origin[0] + d[0] / len * range, sh.origin[1] + d[1] / len * range, sh.origin[2] + d[2] / len * range };
         const char* name = WeaponName(sh.weapon);
         GunFit fit = Re4WeaponFor(name, sh.range);
+        if (sh.range >= 3.f)
+            if (int no = ArsenalWeaponNo(sh.weapon))
+                fit.weapon = no; // exactly the RE4 gun, with its upgrades
         int weapon = fit.weapon;
         int hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
         if (hits > 0)
@@ -1091,10 +1101,11 @@ void Notice(const std::string& text, DWORD ms = 3000)
     g_noticeUntil = GetTickCount() + ms;
 }
 
-// kind 1 = give/equip catalog weapon, 2 = refill ammo (MW2-GTA protocol)
-bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false)
+// kind 1 = give/equip catalog weapon, 2 = refill ammo (MW2-GTA protocol); RE4 runtime mode adds
+// 4 = hold only `weapon` with clip/stock, 5 = set `weapon`'s clip/stock (a grenade's count is its clip)
+bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false, int32_t clip = 0, int32_t stock = 0)
 {
-    if (g_request && g_features.ack != g_request)
+    if (g_request && g_features.ack != g_request && GetTickCount() - g_requestTime < 3000)
     {
         if (!silent)
             Notice("Weapon request still pending");
@@ -1104,6 +1115,9 @@ bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false)
         ++g_request;
     g_requestKind = kind;
     g_requestWeapon = weapon;
+    g_requestClip = clip;
+    g_requestStock = stock;
+    g_requestTime = GetTickCount();
     if (!silent)
         Notice(kind == 2 ? "Refilling ammo..." : "Equipping...");
     return true;
@@ -1123,7 +1137,7 @@ void InfiniteAmmo()
 {
     static DWORD last = 0;
     DWORD now = GetTickCount();
-    if (!g_cfg.infiniteAmmo || !g_active || !g_guest.ready || now - last < 1500)
+    if (!g_cfg.infiniteAmmo || g_cfg.re4Inventory || !g_active || !g_guest.ready || now - last < 1500)
         return;
     bool low = g_guest.stock <= 0 || (g_guest.clip > 0 && g_guest.stock < g_guest.clip) ||
                g_features.lethalAmmo == 0 || g_features.tacticalAmmo == 0;
@@ -1263,7 +1277,7 @@ std::string DamageText()
                  bar.c_str(), v, kGunClassHint[r]);
         t += line;
     }
-    return t + "\nx1.0 = normal RE4 hit for the class (pistols, SMGs, rifles: handgun)";
+    return t + "\nx1.0 = exactly the RE4 gun's damage, upgrades included";
 }
 
 void WeaponMenuInput(bool focused)
@@ -1303,6 +1317,11 @@ void WeaponMenuInput(bool focused)
     }
     if (f8)
         g_damageMenu = false;
+    if ((f8 || f9) && g_cfg.re4Inventory)
+    {
+        Notice("Guns and ammo come from Leon's attache case. 1 = next gun", 4000);
+        f8 = f9 = false;
+    }
     if (f8)
     {
         g_weaponMenu = !g_weaponMenu && !g_catalog.empty();
@@ -1352,6 +1371,532 @@ std::string WeaponMenuText()
     snprintf(page, sizeof(page), "\npage %zu / %zu   (%zu weapons)", first / 12 + 1, (g_catalog.size() + 11) / 12,
              g_catalog.size());
     return t + page;
+}
+
+// ---------------------------------------------------------------- RE4 attache case -> MW2 gun
+// RE4 owns the guns and the ammo. MW2 holds the MW2 gun matching the RE4 gun Leon has equipped; its clip is
+// that RE4 gun's loaded ammo and its reserve the matching ammo boxes in the case. MW2 shots spend RE4 ammo,
+// an MW2 reload takes boxes by RE4's rule (fill to the gun's capacity upgrade), and pickups, the merchant and
+// RE4-mode reloads update MW2. Hits use the RE4 gun's own weapon number, so firepower upgrades count.
+// MW2 grenades are RE4's hand + incendiary grenades (frag) and flash grenades (flash).
+struct GunMap { uint16_t item; const char* key; const char* label; const char* mw2; uint16_t ammo; };
+constexpr uint16_t kNoAmmo = 0xFFFF;
+const GunMap kGuns[] = {
+    { 35, "Handgun", "Handgun", "usp", 4 },
+    { 36, "Handgun", "Handgun", "usp", 4 },
+    { 33, "Punisher", "Punisher", "beretta", 4 },
+    { 64, "Punisher", "Punisher", "beretta", 4 },
+    { 37, "Red9", "Red9", "deserteagle", 4 },
+    { 38, "Red9", "Red9 (stock)", "deserteagle", 4 },
+    { 39, "Blacktail", "Blacktail", "glock", 4 },
+    { 3, "Matilda", "Matilda", "beretta393", 4 },
+    { 41, "BrokenButterfly", "Broken Butterfly", "coltanaconda", 0 },
+    { 42, "Killer7", "Killer7", "deserteaglegold", 0 },
+    { 55, "Handcannon", "Handcannon", "coltanaconda", 26 },
+    { 44, "Shotgun", "Shotgun", "spas12", 24 },
+    { 71, "Shotgun", "Shotgun", "spas12", 24 },
+    { 148, "RiotGun", "Riot Gun", "m1014", 24 },
+    { 45, "Striker", "Striker", "striker", 24 },
+    { 46, "Rifle", "Rifle", "cheytac", 7 },
+    { 107, "Rifle", "Rifle (scope)", "cheytac", 7 },
+    { 153, "Rifle", "Rifle (thermal)", "cheytac", 7 },
+    { 47, "SemiAutoRifle", "Rifle (semi-auto)", "barrett", 7 },
+    { 108, "SemiAutoRifle", "Rifle (semi-auto, scope)", "barrett", 7 },
+    { 81, "SemiAutoRifle", "Rifle (semi-auto, thermal)", "barrett", 7 },
+    { 48, "TMP", "TMP", "tmp", 32 },
+    { 50, "TMP", "TMP (stock)", "tmp", 32 },
+    { 52, "ChicagoTypewriter", "Chicago Typewriter", "ak47", 106 },
+    { 83, "ChicagoTypewriter", "Chicago Typewriter", "ak47", 106 },
+    { 53, "RocketLauncher", "Rocket Launcher", "rpg", kNoAmmo },
+    { 23, "RocketLauncher", "Rocket Launcher (special)", "rpg", kNoAmmo },
+    { 109, "RocketLauncher", "Infinite Launcher", "rpg", kNoAmmo },
+    { 54, "MineThrower", "Mine Thrower", "m79", 70 },
+    { 171, "MineThrower", "Mine Thrower (scope)", "m79", 70 },
+};
+constexpr int kGunCount = sizeof(kGuns) / sizeof(kGuns[0]);
+std::string g_gunMw2[kGunCount]; // MW2 gun per entry, [Guns] in the INI can change it
+
+uint8_t* g_itemMgr = nullptr;
+using ItemArmFn = bool(__fastcall*)(uint8_t* mgr, void* edx, uint8_t* item);
+using ItemEraseFn = void(__fastcall*)(uint8_t* mgr, void* edx, uint8_t* item);
+using ChargeNumFn = uint16_t(__cdecl*)(uint16_t id, int level);
+using WeaponNoFn = uint8_t(__cdecl*)(uint16_t id);
+using WeaponChangeFn = void(__cdecl*)();
+using SpecialTunedFn = bool(__fastcall*)(uint8_t* item, void* edx);
+ItemArmFn g_itemArm = nullptr;
+ItemEraseFn g_itemErase = nullptr;
+ChargeNumFn g_chargeNum = nullptr;
+WeaponNoFn g_weaponNo = nullptr;
+WeaponChangeFn g_weaponChange = nullptr;
+SpecialTunedFn g_specialTuned = nullptr;
+bool ArsenalReady()
+{
+    return g_cfg.re4Inventory && g_itemMgr && g_itemArm && g_itemErase && g_chargeNum && g_weaponNo;
+}
+
+void LoadGunMap()
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    for (int i = 0; i < kGunCount; ++i)
+    {
+        char buf[64];
+        GetPrivateProfileStringA("Guns", kGuns[i].key, kGuns[i].mw2, buf, sizeof(buf), path);
+        g_gunMw2[i] = buf;
+    }
+}
+
+const GunMap* GunFor(uint16_t item, int* index = nullptr)
+{
+    for (int i = 0; i < kGunCount; ++i)
+        if (kGuns[i].item == item)
+        {
+            if (index)
+                *index = i;
+            return &kGuns[i];
+        }
+    return nullptr;
+}
+
+// Every item in Leon's case (cItemMgr item array, as re4_tweaks walks it).
+template <class F> void ForItems(F f)
+{
+    uint8_t* p = At<uint8_t*>(g_itemMgr, re4::ItemMgr_items);
+    int n = At<int>(g_itemMgr, re4::ItemMgr_count);
+    uint8_t chr = At<uint8_t>(g_itemMgr, re4::ItemMgr_char);
+    for (int i = 0; p && i <= n && i < 512; ++i)
+    {
+        p += re4::Item_size;
+        if ((At<uint8_t>(p, re4::Item_flag) & 1) && At<uint8_t>(p, re4::Item_chr) == chr)
+            f(p);
+    }
+}
+
+int CountItem(uint16_t id)
+{
+    int n = 0;
+    ForItems([&](uint8_t* p) { if (At<uint16_t>(p, re4::Item_id) == id) n += At<uint16_t>(p, re4::Item_num); });
+    return n;
+}
+
+void SafeErase(uint8_t* item);
+// Removes up to n of an item (ammo boxes, grenades); returns how many were removed.
+int TakeItem(uint16_t id, int n)
+{
+    std::vector<uint8_t*> stacks;
+    ForItems([&](uint8_t* p) { if (At<uint16_t>(p, re4::Item_id) == id) stacks.push_back(p); });
+    int taken = 0;
+    for (uint8_t* p : stacks)
+    {
+        if (taken >= n)
+            break;
+        uint16_t& num = At<uint16_t>(p, re4::Item_num);
+        int t = std::min<int>(num, n - taken);
+        num = (uint16_t)(num - t);
+        taken += t;
+        if (!num)
+            SafeErase(p);
+    }
+    return taken;
+}
+
+bool ItemValid(uint8_t* item, uint16_t id)
+{
+    bool found = false;
+    ForItems([&](uint8_t* p) { if (p == item && At<uint16_t>(p, re4::Item_id) == id) found = true; });
+    return found;
+}
+
+uint8_t* EquippedItem()
+{
+    uint8_t* item = At<uint8_t*>(g_itemMgr, re4::ItemMgr_wep);
+    if (!item || !(At<uint8_t>(item, re4::Item_flag) & 1))
+        return nullptr;
+    return item;
+}
+
+int Loaded(uint8_t* item) { return At<uint16_t>(item, re4::Item_ammo) >> 3; }
+void SetLoaded(uint8_t* item, int n)
+{
+    uint16_t& v = At<uint16_t>(item, re4::Item_ammo);
+    v = (uint16_t)((v & 7) | (std::clamp(n, 0, 8191) << 3));
+}
+int Capacity(uint8_t* item)
+{
+    int level = ((At<uint16_t>(item, re4::Item_levels) >> 12) & 0xF) + 1;
+    int n = g_chargeNum(At<uint16_t>(item, re4::Item_id), level);
+    return n == 0x8000 ? 1 : n; // 0x8000: single shot (rocket launcher)
+}
+// Exclusive upgrades with unlimited ammo: Chicago Typewriter, Handcannon; and the Infinite Launcher.
+bool Unlimited(uint8_t* item)
+{
+    uint16_t id = At<uint16_t>(item, re4::Item_id);
+    if (id == 109)
+        return true;
+    if (id != 52 && id != 83 && id != 55)
+        return false;
+    if (((At<uint16_t>(item, re4::Item_levels) >> 12) & 0xF) + 1 >= 7)
+        return true;
+    return g_specialTuned && g_specialTuned(item, nullptr);
+}
+int Reserve(const GunMap* gun) { return gun->ammo == kNoAmmo ? 0 : CountItem(gun->ammo); }
+// A rocket launcher in the case is loaded (one shot); others report their loaded ammo.
+int LoadedFor(uint8_t* item, const GunMap* gun) { return gun->ammo == kNoAmmo ? 1 : Loaded(item); }
+
+uint32_t CatalogWeapon(const std::string& name)
+{
+    for (auto& e : g_catalogAll)
+        if (name == e.name)
+            return e.weapon;
+    return 0;
+}
+
+std::string Upper(std::string t)
+{
+    for (auto& c : t)
+        c = (char)toupper((unsigned char)c);
+    return t;
+}
+
+struct Arsenal
+{
+    uint8_t* item = nullptr;    // RE4 gun MW2 holds
+    uint16_t itemId = 0;
+    int gun = -1;               // kGuns index
+    uint32_t weapon = 0;        // MW2 weapon id
+    int clip = -1, stock = -1;  // what MW2 was told
+    bool stockHidden = false;   // MW2's reserve shown as 0 so it stops reloading a full RE4 gun
+    int frag = -1, flash = -1;
+    uint32_t pending = 0;       // request waiting for its ack
+    // after an ack: what MW2 should show before its counts mean anything again (it reports what it displays,
+    // which can be a frame or two behind)
+    int expect = 0;             // 0 nothing, 1 gun clip/stock, 2 frag count, 3 flash count
+    uint32_t expectWeapon = 0;
+    int expectClip = 0, expectStock = 0;
+    DWORD expectSince = 0, expectFor = 0;
+    DWORD equippedAt = 0;
+    DWORD runtimeStarted = 0;
+    std::string missing;        // MW2 gun name not in MW2's catalog (logged once)
+} g_arm;
+
+bool ArmRequest(uint32_t kind, uint32_t weapon, int clip, int stock, int expect = 1)
+{
+    if (!Request(kind, weapon, true, clip, stock))
+        return false;
+    g_arm.pending = g_request;
+    g_arm.expect = expect;
+    g_arm.expectWeapon = weapon;
+    g_arm.expectClip = clip;
+    g_arm.expectStock = stock;
+    g_arm.expectFor = kind == 4 ? 2500 : 1000;
+    return true;
+}
+
+void SafeArm(uint8_t* item)
+{
+    __try
+    {
+        if (g_itemArm(g_itemMgr, nullptr, item) && g_weaponChange)
+            g_weaponChange();
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log("arsenal: equipping a gun faulted");
+    }
+}
+
+void SafeErase(uint8_t* item)
+{
+    __try
+    {
+        g_itemErase(g_itemMgr, nullptr, item);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log("arsenal: removing an item faulted");
+    }
+}
+
+int SafeWeaponNo(uint16_t id)
+{
+    __try
+    {
+        return g_weaponNo(id);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
+}
+
+// '1': Leon equips the next gun in his case (RE4 then hands it to MW2).
+void NextGun()
+{
+    uint8_t* current = EquippedItem();
+    std::vector<uint8_t*> guns;
+    ForItems([&](uint8_t* p) { if (GunFor(At<uint16_t>(p, re4::Item_id))) guns.push_back(p); });
+    std::sort(guns.begin(), guns.end(), [](uint8_t* a, uint8_t* b) {
+        int ia = 0, ib = 0;
+        GunFor(At<uint16_t>(a, re4::Item_id), &ia);
+        GunFor(At<uint16_t>(b, re4::Item_id), &ib);
+        return ia != ib ? ia < ib : a < b;
+    });
+    if (guns.empty())
+        return;
+    size_t i = 0;
+    while (i < guns.size() && guns[i] != current)
+        ++i;
+    uint8_t* next = guns[i < guns.size() ? (i + 1) % guns.size() : 0];
+    if (next != current)
+        SafeArm(next);
+}
+
+void ArsenalUpdate(bool focused)
+{
+    static bool nextWas = false;
+    bool next = focused && g_active && !MenuOpen() && Down('1');
+    bool nextPressed = next && !nextWas;
+    nextWas = next;
+    if (!ArsenalReady())
+        return;
+    if (g_arm.runtimeStarted != g_runtimeStarted)
+    {
+        Arsenal fresh;
+        fresh.runtimeStarted = g_runtimeStarted;
+        g_arm = fresh;
+    }
+    if (!g_active || !g_guest.ready || g_catalogAll.empty())
+        return;
+    if (nextPressed)
+        NextGun();
+    DWORD now = GetTickCount();
+    if (g_arm.pending)
+    {
+        if (g_features.ack == g_arm.pending)
+        {
+            if (g_features.outcome != 1)
+                Log("arsenal: MW2 refused request %u (kind %u weapon %u clip %d stock %d)", g_arm.pending,
+                    g_requestKind, g_requestWeapon, g_requestClip, g_requestStock);
+            g_arm.pending = 0;
+            g_arm.expectSince = now;
+            if (g_features.outcome != 1)
+                g_arm.expect = 0;
+        }
+        else if (now - g_requestTime < 3000)
+            return;
+        else
+        {
+            Log("arsenal: request %u got no answer, sending again", g_arm.pending);
+            g_arm.pending = 0;
+            g_arm.expect = 0;
+            g_arm.weapon = 0;
+        }
+    }
+    if (g_arm.expect)
+    {
+        bool shown = g_arm.expect == 1 ? g_guest.reserved[0] == g_arm.expectWeapon && g_guest.clip == g_arm.expectClip &&
+                                             g_guest.stock == g_arm.expectStock
+                   : g_arm.expect == 2 ? g_features.lethalAmmo == g_arm.expectClip
+                                       : g_features.tacticalAmmo == g_arm.expectClip;
+        if (!shown && now - g_arm.expectSince < g_arm.expectFor)
+            return;
+        if (!shown)
+            Log("arsenal: MW2 shows weapon %u clip %d stock %d (frag %d flash %d), expected weapon %u %d/%d", g_guest.reserved[0],
+                g_guest.clip, g_guest.stock, g_features.lethalAmmo, g_features.tacticalAmmo, g_arm.expectWeapon,
+                g_arm.expectClip, g_arm.expectStock);
+        g_arm.expect = 0;
+    }
+
+    // 1. The gun: Leon's equipped RE4 gun (a knife or grenade in his hands keeps the last gun).
+    uint8_t* eq = EquippedItem();
+    int index = -1;
+    const GunMap* want = eq ? GunFor(At<uint16_t>(eq, re4::Item_id), &index) : nullptr;
+    if (want && (eq != g_arm.item || !g_arm.weapon))
+    {
+        uint32_t weapon = CatalogWeapon(g_gunMw2[index]);
+        if (!weapon && g_gunMw2[index] == "deserteaglegold")
+            weapon = CatalogWeapon("deserteagle");
+        if (!weapon)
+        {
+            if (g_arm.missing != g_gunMw2[index])
+            {
+                g_arm.missing = g_gunMw2[index];
+                Log("arsenal: MW2 has no gun '%s' (for RE4 %s); check [Guns] in MW2RE4.ini", g_gunMw2[index].c_str(),
+                    want->label);
+                Notice("MW2 has no gun called " + g_gunMw2[index]);
+            }
+            return;
+        }
+        bool unlimited = Unlimited(eq) || g_cfg.infiniteAmmo;
+        int clip = unlimited ? 999 : LoadedFor(eq, want), stock = unlimited ? 0 : Reserve(want);
+        if (!ArmRequest(4, weapon, clip, stock))
+            return;
+        bool first = !g_arm.weapon;
+        g_arm.item = eq;
+        g_arm.itemId = At<uint16_t>(eq, re4::Item_id);
+        g_arm.gun = index;
+        g_arm.weapon = weapon;
+        g_arm.clip = clip;
+        g_arm.stock = stock;
+        g_arm.stockHidden = false;
+        g_arm.equippedAt = now;
+        Log("arsenal: RE4 %s -> MW2 %s (weapon %u) clip %d reserve %d%s", want->label, g_gunMw2[index].c_str(), weapon,
+            clip, stock, unlimited ? " (unlimited)" : "");
+        if (!first)
+            Notice(std::string(want->label) + "  =  " + Upper(g_gunMw2[index]), 2500);
+        return;
+    }
+    if (g_arm.item && !ItemValid(g_arm.item, g_arm.itemId))
+    {
+        // sold, or a rocket launcher that was fired: MW2's copy is empty until Leon equips another gun
+        Log("arsenal: RE4 gun %u left the case", g_arm.itemId);
+        g_arm.item = nullptr;
+        ArmRequest(5, g_arm.weapon, 0, 0, 0);
+        g_arm.clip = g_arm.stock = 0;
+        return;
+    }
+
+    // 2. Its ammo.
+    if (g_arm.item && g_guest.reserved[0] == g_arm.weapon)
+    {
+        const GunMap* gun = &kGuns[g_arm.gun];
+        uint8_t* item = g_arm.item;
+        int c = g_guest.clip, s = g_guest.stock;
+        if (Unlimited(item) || g_cfg.infiniteAmmo)
+        {
+            if (c < 900 && ArmRequest(5, g_arm.weapon, 999, 0))
+                g_arm.clip = 999, g_arm.stock = 0;
+            return;
+        }
+        int loaded = LoadedFor(item, gun), reserve = Reserve(gun), cap = std::max(1, Capacity(item));
+        if (s < g_arm.stock)
+        {
+            // MW2 reloaded: RE4's rule decides how much goes in (up to the capacity upgrade)
+            int base = std::min(g_arm.clip, loaded);
+            int fill = std::clamp(std::min(cap, base + reserve) - base, 0, reserve);
+            fill = TakeItem(gun->ammo, fill);
+            SetLoaded(item, base + fill);
+            reserve -= fill;
+            bool hide = fill == 0; // already full by RE4's rule: stop MW2 from reloading again and again
+            ArmRequest(5, g_arm.weapon, base + fill, hide ? 0 : reserve);
+            g_arm.clip = base + fill; // the boxes are spent: never count this reload twice
+            g_arm.stock = hide ? 0 : reserve;
+            g_arm.stockHidden = hide;
+            Log("arsenal: reload %s %d -> %d of %d, %d left in the case%s", gun->label, base, base + fill, cap, reserve,
+                hide ? " (full)" : "");
+            return;
+        }
+        if (c < g_arm.clip)
+        {
+            if (gun->ammo != kNoAmmo)
+                SetLoaded(item, c); // shots
+            loaded = c;
+            g_arm.clip = c;
+            if (g_arm.stockHidden)
+                g_arm.stockHidden = false; // MW2 may reload again: show the real reserve
+            if (c == 0 && gun->ammo == kNoAmmo && At<uint16_t>(item, re4::Item_id) != 109)
+            {
+                // a rocket launcher is used up, as in RE4
+                Log("arsenal: %s fired, removed from the case", gun->label);
+                SafeErase(item);
+                g_arm.item = nullptr;
+                NextGun();
+                return;
+            }
+        }
+        int wantStock = g_arm.stockHidden ? 0 : reserve;
+        // (not while firing: setting the clip then would hand back the shots fired meanwhile)
+        if ((loaded != g_arm.clip || wantStock != g_arm.stock) && !Down(VK_LBUTTON))
+        {
+            // pickups, the merchant, an RE4-mode reload
+            if (ArmRequest(5, g_arm.weapon, loaded, wantStock))
+            {
+                g_arm.clip = loaded;
+                g_arm.stock = wantStock;
+            }
+            return;
+        }
+    }
+    else if (g_arm.weapon && now - g_arm.equippedAt > 4000)
+    {
+        Log("arsenal: MW2 holds weapon %u instead of %u, equipping again", g_guest.reserved[0], g_arm.weapon);
+        g_arm.weapon = 0;
+        return;
+    }
+
+    // 3. Grenades.
+    uint32_t fragWeapon = CatalogWeapon("frag grenade"), flashWeapon = CatalogWeapon("flash grenade");
+    int grenades = CountItem(re4::ITEM_GRENADE) + CountItem(re4::ITEM_FLAME_GRENADE);
+    int flashes = CountItem(re4::ITEM_FLASH_GRENADE);
+    if (fragWeapon)
+    {
+        if (g_arm.frag > 0 && g_features.lethalAmmo < g_arm.frag)
+        {
+            int thrown = g_arm.frag - std::max(0, g_features.lethalAmmo);
+            int t = TakeItem(re4::ITEM_GRENADE, thrown);
+            TakeItem(re4::ITEM_FLAME_GRENADE, thrown - t);
+            grenades = std::max(0, grenades - thrown);
+            g_arm.frag = std::max(0, g_features.lethalAmmo);
+        }
+        if (grenades != g_arm.frag && ArmRequest(5, fragWeapon, grenades, 0, 2))
+        {
+            g_arm.frag = grenades;
+            return;
+        }
+    }
+    if (flashWeapon)
+    {
+        if (g_arm.flash > 0 && g_features.tacticalAmmo < g_arm.flash)
+        {
+            int thrown = g_arm.flash - std::max(0, g_features.tacticalAmmo);
+            TakeItem(re4::ITEM_FLASH_GRENADE, thrown);
+            flashes = std::max(0, flashes - thrown);
+            g_arm.flash = std::max(0, g_features.tacticalAmmo);
+        }
+        if (flashes != g_arm.flash && ArmRequest(5, flashWeapon, flashes, 0, 3))
+            g_arm.flash = flashes;
+    }
+}
+
+// The RE4 weapon number of the gun MW2 is firing, or 0 when MW2's gun is not one of RE4's.
+int ArsenalWeaponNo(uint32_t mw2Weapon)
+{
+    if (!ArsenalReady() || !g_arm.item || mw2Weapon != g_arm.weapon)
+        return 0;
+    return SafeWeaponNo(g_arm.itemId);
+}
+
+void SafeArsenalUpdate(bool focused)
+{
+    __try
+    {
+        ArsenalUpdate(focused);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        static int logged = 0;
+        if (logged++ < 5)
+            Log("arsenal: faulted");
+    }
+}
+
+// RE4 gun -> MW2 gun list, shown while the attache case or the merchant is open.
+std::string GunListText()
+{
+    std::string t = "MW2 GUNS IN RE4\n";
+    for (int i = 0; i < kGunCount; ++i)
+    {
+        if (i && !strcmp(kGuns[i].key, kGuns[i - 1].key))
+            continue;
+        char line[96];
+        std::string label = kGuns[i].label;
+        size_t paren = label.find(" (");
+        if (paren != std::string::npos)
+            label.resize(paren);
+        snprintf(line, sizeof(line), "%-19s %s\n", label.c_str(), Upper(g_gunMw2[i]).c_str());
+        t += line;
+    }
+    return t;
 }
 
 // ---------------------------------------------------------------- damage trace (research)
@@ -1526,6 +2071,8 @@ void Exchange(uint8_t* g, uint8_t* pl)
     feature->request = g_request;
     feature->kind = g_requestKind;
     feature->weapon = g_requestWeapon;
+    feature->reserved[1] = (uint32_t)g_requestClip;
+    feature->reserved[2] = (uint32_t)g_requestStock;
     // MW2's accepted shots and explosions, resolved in RE4 after the lock (ResolveShots).
     uint32_t available = g_guest.shots - g_lastShot;
     if (available > ShotCount)
@@ -1770,6 +2317,7 @@ void __cdecl CameraSetHook(uint8_t* camera)
         Activate(g, pl);
 
     Exchange(g, pl);
+    SafeArsenalUpdate(focused);
     g_lastTick = GetTickCount();
     if (g_active && g)
     {
@@ -1889,7 +2437,7 @@ struct TextTexture
     IDirect3DTexture9* texture = nullptr;
     UINT width = 0, height = 0;
 };
-TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText, g_damageText;
+TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText, g_damageText, g_gunListText;
 
 void ReleaseText(TextTexture& t)
 {
@@ -1994,10 +2542,10 @@ const char* kHelp =
     "Shift  sprint     Space  jump\n"
     "C  crouch         Ctrl  prone\n"
     "Left click  fire  Right click  aim\n"
-    "R  reload         1 / 2  switch weapon\n"
+    "R  reload         1  next gun in the case\n"
     "G  grenade        H  tactical\n"
     "V  melee          E  use: doors, items\n"
-    "F8  weapon menu   F9  refill ammo\n"
+    "Guns and ammo: Leon's attache case\n"
     "F10  settings: FOV, mouse, ammo, skin\n"
     "F11  gun damage\n"
     "U  UAV radar (shows Ganados)\n"
@@ -2044,7 +2592,9 @@ void DrawOverlay(IDirect3DDevice9* device)
             ((Control*)g_shared)->host.enabled = 0; // MW2 ignores input while RE4 is paused
     }
     bool drawMw2 = g_active && ticking;
-    if (!drawMw2 && !indicator)
+    uint8_t* gl = Global();
+    bool gunList = g_requested && ArsenalReady() && gl && (At<uint32_t>(gl, re4::G_statusFlags) & re4::STA_SUB_SCRN);
+    if (!drawMw2 && !indicator && !gunList)
         return;
     CreateChromaShader(device);
     uint32_t sequence = 0;
@@ -2221,6 +2771,8 @@ void DrawOverlay(IDirect3DDevice9* device)
             DrawPanel(device, g_settingsText, (w - g_settingsText.width) / 2, h * .22f, 0xfff0f0f0);
         if (drawMw2 && g_weaponMenu && UpdateText(device, g_menuText, WeaponMenuText(), (int)(textPx * 1.15f)))
             DrawPanel(device, g_menuText, (w - g_menuText.width) / 2, h * .16f, 0xfff0f0f0);
+        if (gunList && UpdateText(device, g_gunListText, GunListText(), std::max(10, textPx * 4 / 5)))
+            DrawPanel(device, g_gunListText, w - g_gunListText.width - h * .02f, h * .98f - g_gunListText.height, 0xffffd746);
         if (drawMw2 && GetTickCount() < g_noticeUntil && UpdateText(device, g_noticeText, g_notice, textPx))
             DrawPanel(device, g_noticeText, h * .03f, h * .80f, 0xffffd746);
         device->EndScene();
@@ -2408,6 +2960,22 @@ bool Init()
         if (thunk && HookThunk(thunk, (void*)&MesSetHook, (void**)&g_mesSetOrig))
             Log("captions: MesSet hooked at thunk 0x%p", (void*)thunk);
     }
+    auto callTarget = [](uint8_t* site) -> uint8_t* {
+        return site && site[0] == 0xE8 ? site + 5 + *(int32_t*)(site + 1) : nullptr;
+    };
+    if (uint8_t* im = Find(m, re4::kItemMgr))
+        g_itemMgr = *(uint8_t**)im;
+    g_itemArm = (ItemArmFn)callTarget(Find(m, re4::kItemArm));
+    g_itemErase = (ItemEraseFn)callTarget(Find(m, re4::kItemErase));
+    g_chargeNum = (ChargeNumFn)callTarget(Find(m, re4::kChargeNum));
+    g_weaponNo = (WeaponNoFn)callTarget(Find(m, re4::kWeaponNo));
+    g_weaponChange = (WeaponChangeFn)callTarget(Find(m, re4::kWeaponChange));
+    g_specialTuned = (SpecialTunedFn)callTarget(Find(m, re4::kSpecialTuned));
+    LoadGunMap();
+    Log("attache case: ItemMgr 0x%p arm %p erase %p chargeNum %p weaponNo %p weaponChange %p specialTuned %p -> %s",
+        (void*)g_itemMgr, (void*)g_itemArm, (void*)g_itemErase, (void*)g_chargeNum, (void*)g_weaponNo,
+        (void*)g_weaponChange, (void*)g_specialTuned,
+        ArsenalReady() ? "MW2 uses RE4's guns and ammo" : "MW2 keeps its own guns (Re4Inventory=0 or a pattern is missing)");
     if (uint8_t* ids = Find(m, re4::kIdSys))
         g_idSys = *(uint8_t**)ids;
     if (em)

@@ -131,3 +131,25 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 ## v19 (2026-10-19)
 - F11 now = damage multiplier sliders per gun class (normal pistols, tough pistols, SMGs, assault rifles incl. LMGs, 12 gauge, snipers), x0.1-x5.0, INI Damage0..5. Classes hit through a fixed RE4 gun (handgun; shotgun/Striker; bolt/semi rifle) for reactions; LifeDownSet2's JMP thunk (0x4071C1, pattern kLifeDown) is hooked with a naked stub that scales the damage arg for enemies (model id != 0) for 400 ms after an MW2 bullet hit; grenades reset it. [Weapons] and the *Weapon keys were removed (old INI kept as builds\MW2RE4.ini.before-v19.bak).
 
+
+
+## v20 (2026-10-20): RE4 owns guns, ammo and health; own runtime build
+- **Runtime**: `iw4l-source\` = copy of MW2-GTA's iw4l-source working tree (runtime v50, snapshot commit 43e09d1 in its own git), built here
+  into `runtime-build\` (gitignored; `CARGO_TARGET_DIR=F:\ModProjects\MW2-RE4\runtime-build`, `CARGO_PROFILE_DEV_DEBUG=0`,
+  `CARGO_PROFILE_DEV_OPT_LEVEL=1`, `CARGO_INCREMENTAL=0`, `cargo build -p launcher -j 4 --offline`; F: has little space, watch it).
+  Output `runtime-build\debug\iw4l.exe` is deployed as `iw4l-runtime\iw4l-re4.exe` (v41 kept as `iw4l-re4.v41-from-mw2gta.exe`).
+  Changes (env `IW4L_RE4_BRIDGE=1`, set by the plugin): god mode on the local player every tick (`SimWorld::bridge_god`);
+  no saved loadout (gta-loadout.txt) and no free frag; request kind 4 = hold only `weapon` (other primaries taken, given if missing,
+  ammo set, switched to) and kind 5 = set `weapon`'s clip/stock (unclamped up to 999/9999; an offhand's count is its clip and it
+  replaces the same-class offhand). Clip/stock travel in Features reserved[1]/[2] (BASE+48/+52, the GTA announcer words; announcer off
+  in RE4 mode). MW2-GTA's v47+ runtime already ignores the map's scripted suicide (MOD_SUICIDE 100000 at out-of-bounds spots) when
+  `IW4L_GTA_BRIDGE` is set: that was the random death + loadout reset.
+- **Plugin (Arsenal)**: ItemMgr 0xC70FD4 and cItemMgr::arm/erase, WeaponId2ChargeNum/WeaponNo, WeaponChange, cItem::specialTuned via
+  re4_tweaks patterns. Equipped RE4 gun (`m_pWep_C`) -> MW2 gun from `kGuns` / INI [Guns]; clip = item loaded ammo (weapon_6[1] >> 3),
+  reserve = ammo boxes of its type in the case. MW2 shots set the item's loaded ammo; an MW2 reload (stock drop) fills by RE4's rule up to
+  WeaponId2ChargeNum(id, capacity level) and takes boxes; when already full, MW2's reserve is shown as 0 so MW2 stops reloading;
+  pickups/merchant/RE4 reloads resend. Requests wait for MW2 to display the values (guest clip/stock are from the presented snapshot).
+  Grenades: frag = hand + incendiary, flash = flash grenades. Rocket launcher erased after its shot (not the Infinite Launcher).
+  '1' arms the next gun in the case. Hits use WeaponId2WeaponNo(item) so firepower upgrades count; F11 multipliers reset to 1.0.
+  Gun list overlay while STA_SUB_SCRN is set (attache case; merchant untested). F8/F9 disabled when Re4Inventory=1.
+  Not mapped: firing speed and reload speed upgrades (MW2 keeps its own rates).

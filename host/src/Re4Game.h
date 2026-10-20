@@ -136,6 +136,23 @@ namespace re4
     // LifeDownSet2(cEm* em, int damage, int random, ...) __cdecl: subtracts damage from an enemy (or Leon, model id 0).
     // Called through a JMP thunk; the hook scales `damage` ([esp+8] on entry).
     constexpr Pattern kLifeDown   { "LifeDownSet2", "55 8B EC 53 56 57 E8 ? ? ? ? 0F B6 F0 C1 E6 08 E8 ? ? ? ? 8B 4D 10 8B 7D 0C", 0, false };
+    // Leon's attache case (re4_tweaks Game.cpp, SDK/item.h). cItemMgr is a global object: address at match+0xE
+    // (2 matches, same value). The functions are reached through the E8 call at the given offset.
+    constexpr Pattern kItemMgr     { "ItemMgr", "80 B9 C0 4F 00 00 10 0F 84 ? ? ? ? B9", 0xE, true };
+    constexpr Pattern kItemArm     { "cItemMgr::arm call", "8B 0D ? ? ? ? 51 B9 ? ? ? ? E8 ? ? ? ? 5F 5E 5B 8B E5", 12, false };
+    constexpr Pattern kItemErase   { "cItemMgr::erase call", "E8 ? ? ? ? 8A 45 ? 8B 4D ? 24 ? 66 0F ? ? 8D 04 FD ? ? ? ? 66 0B ? 66 89 53", 0, false };
+    constexpr Pattern kChargeNum   { "WeaponId2ChargeNum call", "E8 ? ? ? ? B9 ? ? ? ? 83 C4 ? 66 3B ? 0F 84", 0, false };
+    constexpr Pattern kWeaponNo    { "WeaponId2WeaponNo call", "E8 ? ? ? ? 0F B7 15 ? ? ? ? 0F B6 C8 52 89 4D E8 E8 ? ? ? ? 0F B6 C0", 0, false };
+    constexpr Pattern kWeaponChange { "WeaponChange call", "6A 01 E8 ? ? ? ? 83 C4 04 E8 ? ? ? ? F6", 0xA, false };
+    constexpr Pattern kSpecialTuned { "cItem::specialTuned call", "8B CE E8 ? ? ? ? 84 C0 74 ? C6", 2, false };
+    // cItemMgr: equipped weapon item, owner, item array and its last index
+    constexpr size_t ItemMgr_wep = 0x0C, ItemMgr_char = 0x13, ItemMgr_items = 0x14, ItemMgr_count = 0x1C;
+    // cItem (0xE bytes): id, count, flags (bit 0 = in use), owner, weapon levels (4 bits each: firepower,
+    // firing speed, reload speed, capacity; stored minus one), loaded ammo << 3
+    constexpr size_t Item_size = 0xE, Item_id = 0x0, Item_num = 0x2, Item_flag = 0x4, Item_chr = 0x5,
+                     Item_levels = 0x6, Item_ammo = 0x8;
+    // Item ids (re4_tweaks SDK/item.h EItemId)
+    constexpr uint16_t ITEM_GRENADE = 1, ITEM_FLAME_GRENADE = 2, ITEM_FLASH_GRENADE = 14;
     // QTE active byte (QTEFixes.cpp): RE4 is showing a quick-time button prompt
     constexpr Pattern kQteActive  { "QTE active", "C6 05 ? ? ? ? ? E8 ? ? ? ? 83 C4 ? 84 C0 0F 84", 2, false };
     // IDSystem (RE4's 2D interface): m_maxId at +0, ID_UNIT array at +0x50 (Game.cpp, SDK/ID.h)

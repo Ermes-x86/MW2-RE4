@@ -1,0 +1,219 @@
+diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
+index 32839dd..b09d58b 100644
+--- a/crates/bootstrap/src/gta_bridge.rs
++++ b/crates/bootstrap/src/gta_bridge.rs
+@@ -481,7 +481,12 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+         bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
+         bridge.host_lock = unsafe { memory.read(HOST_LOCK) };
+         bridge.features.request = unsafe { memory.read(features::BASE) };
+-        bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
++        if features::re4_mode() {
++            // RE4 has no announcer; these two words carry the ammo of requests 4 and 5.
++            bridge.features.ammo = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
++        } else {
++            bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
++        }
+         bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
+     }
+     if let Some(_guard) = memory.lock_scene() {
+diff --git a/crates/bootstrap/src/gta_bridge/features.rs b/crates/bootstrap/src/gta_bridge/features.rs
+index c415d3c..89a7639 100644
+--- a/crates/bootstrap/src/gta_bridge/features.rs
++++ b/crates/bootstrap/src/gta_bridge/features.rs
+@@ -15,6 +15,8 @@ pub(super) struct Request {
+ #[derive(Default)]
+ pub(super) struct State {
+     pub request: Request,
++    /// RE4 bridge (IW4L_RE4_BRIDGE): clip and reserve for request kinds 4 and 5.
++    pub ammo: (i32, i32),
+     received: u32,
+     pending: Option<(u32, u32)>,
+     ack: u32,
+@@ -116,7 +118,13 @@ pub(super) fn host_actions(
+     let Some(ps) = world.0.player(local.0).copied() else {
+         return;
+     };
+-    if !bridge.features.catalog.is_empty() {
++    let re4 = re4_mode();
++    if re4 {
++        // RE4 owns the guns, the ammo and the health: no saved loadout, no free
++        // frag grenade, and the MW2 player never dies.
++        world.0.bridge_god(local.0);
++    }
++    if !re4 && !bridge.features.catalog.is_empty() {
+         let step = bridge.features.loadout.step(&world.0, &ps);
+         match step {
+             Some(super::loadout::Step::Select(weapon)) => bridge.features.forced_selection = Some(weapon),
+@@ -144,7 +152,7 @@ pub(super) fn host_actions(
+             .equipment_facts_for(w as u32)
+             .is_some_and(|f| f.is_offhand() && matches!(f.offhand_class, 1 | 4 | 5))
+     });
+-    if bridge.features.equipment_epoch != bridge.host_movement.epoch && !bridge.features.loadout.restoring() {
++    if !re4 && bridge.features.equipment_epoch != bridge.host_movement.epoch && !bridge.features.loadout.restoring() {
+         bridge.features.equipment_epoch = bridge.host_movement.epoch;
+         if let Some(weapon) = world
+             .0
+@@ -167,6 +175,28 @@ pub(super) fn host_actions(
+         return;
+     }
+     bridge.features.received = request.sequence;
++    if re4 && matches!(request.kind, 4 | 5) {
++        // 4: hold only `weapon` with this ammo; 5: set `weapon`'s ammo.
++        let (clip, stock) = bridge.features.ammo;
++        let applied = if request.kind == 4 {
++            world.0.bridge_equip(local.0, request.weapon, clip, stock)
++        } else {
++            world.0.bridge_set_ammo(local.0, request.weapon, clip, stock)
++        };
++        if applied && request.kind == 4 {
++            bridge.features.forced_selection = Some(request.weapon);
++        }
++        diag::info!(
++            Launch,
++            "RE4 inventory request: {} kind={} weapon={} clip={clip} stock={stock} applied={applied}",
++            request.sequence,
++            request.kind,
++            request.weapon
++        );
++        bridge.features.ack = request.sequence;
++        bridge.features.outcome = if applied { 1 } else { 3 };
++        return;
++    }
+     if request.kind == 3 {
+         // `weapon` carries the id of a planted projectile GTA saw triggered.
+         let applied = world.0.detonate_projectile(local.0, request.weapon);
+@@ -203,6 +233,10 @@ pub(super) fn host_actions(
+         }
+     }
+ }
++pub(super) fn re4_mode() -> bool {
++    static RE4: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *RE4.get_or_init(|| std::env::var_os("IW4L_RE4_BRIDGE").is_some())
++}
+ fn position(bridge: &Bridge, origin: [f32; 3]) -> [f32; 3] {
+     let anchor = bridge.anchor.unwrap_or(bridge.host_movement.foot);
+     std::array::from_fn(|i| anchor[i] + (origin[i] - bridge.engine_anchor[i]) / UNITS_PER_METER)
+@@ -321,7 +355,7 @@ pub(super) fn export(
+             }
+         }
+     }
+-    if host_has_player(bridge) && !bridge.features.catalog.is_empty() {
++    if !re4_mode() && host_has_player(bridge) && !bridge.features.catalog.is_empty() {
+         if let Some(ps) = world.player(local) {
+             bridge.features.loadout.save(world, ps);
+         }
+diff --git a/crates/sim/src/carrier.rs b/crates/sim/src/carrier.rs
+index 0629207..7e4e6df 100644
+--- a/crates/sim/src/carrier.rs
++++ b/crates/sim/src/carrier.rs
+@@ -20,6 +20,28 @@ pub struct SimWorld {
+     schedule: bevy_ecs::schedule::Schedule,
+ }
+ 
++fn bridge_ammo(frame: &mut FrameWorld, id: ClientId, weapon: u32, clip: i32, stock: i32) {
++    let Some(facts) = frame.combat_facts_for(weapon) else {
++        return;
++    };
++    let offhand = frame.equipment_facts_for(weapon).is_some_and(|eq| eq.is_offhand());
++    let clip = clip.clamp(0, 999);
++    let stock = if offhand { 0 } else { stock.clamp(0, 9999) };
++    let clip_key = weapon_iw4::clip_table_key(facts.clip_index, weapon);
++    let ammo_key = weapon_iw4::ammo_table_key(facts.ammo_index, weapon);
++    if let Some(ps) = frame.player_mut(id) {
++        let _ = weapon_iw4::set_clip_for_hand(&mut ps.ammoclip, clip_key, 0, clip);
++        if !offhand {
++            let _ = weapon_iw4::set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock);
++        }
++    }
++    let meta = frame.client_meta_mut(id);
++    meta.set_ammo(weapon, clip, stock);
++    if frame.player(id).is_some_and(|ps| ps.weapon == weapon) {
++        frame.client_meta_mut(id).mirror_held_ammo(weapon);
++    }
++}
++
+ impl Default for SimWorld {
+     fn default() -> Self {
+         let mut ecs = World::new();
+@@ -223,6 +245,81 @@ impl SimWorld {
+         true
+     }
+ 
++    /// RE4 bridge: the host game owns the inventory. MW2 holds exactly the
++    /// host's equipped gun: every other primary is taken, `weapon` is given if
++    /// missing, its ammo set to the host's and it is raised.
++    pub fn bridge_equip(&mut self, id: ClientId, weapon: u32, clip: i32, stock: i32) -> bool {
++        use crate::script_player::{WeaponList, give_weapon, has_weapon, switch_to_weapon, take_weapon, weapons};
++        let mut frame = self.frame();
++        if frame.player(id).is_none() || frame.combat_facts_for(weapon).is_none() {
++            return false;
++        }
++        for other in weapons(&frame, id, WeaponList::Primaries) {
++            if other != weapon {
++                take_weapon(&mut frame, id, other);
++            }
++        }
++        if !has_weapon(&frame, id, weapon) && give_weapon(&mut frame, id, weapon, false).is_err() {
++            return false;
++        }
++        bridge_ammo(&mut frame, id, weapon, clip, stock);
++        switch_to_weapon(&mut frame, id, weapon);
++        true
++    }
++
++    /// RE4 bridge: sets one weapon's clip and reserve to the host's counts,
++    /// beyond IW4's clip size and max ammo (RE4 capacity upgrades). An offhand
++    /// (grenade) keeps its count in the clip and is given when it is missing.
++    pub fn bridge_set_ammo(&mut self, id: ClientId, weapon: u32, clip: i32, stock: i32) -> bool {
++        use crate::script_player::{WeaponList, give_weapon, has_weapon, take_weapon, weapons};
++        let mut frame = self.frame();
++        if frame.player(id).is_none() || frame.combat_facts_for(weapon).is_none() {
++            return false;
++        }
++        if !has_weapon(&frame, id, weapon) {
++            if clip <= 0 && stock <= 0 {
++                return true;
++            }
++            if give_weapon(&mut frame, id, weapon, false).is_err() {
++                return false;
++            }
++        }
++        if let Some(eq) = frame.equipment_facts_for(weapon).filter(|eq| eq.is_offhand()) {
++            // One lethal and one tactical: the host's grenade replaces the class's.
++            let lethal = |class: i32| matches!(class, 1 | 4 | 5);
++            for other in weapons(&frame, id, WeaponList::Offhands) {
++                if other != weapon
++                    && frame
++                        .equipment_facts_for(other)
++                        .is_some_and(|o| o.is_offhand() && lethal(o.offhand_class) == lethal(eq.offhand_class))
++                {
++                    take_weapon(&mut frame, id, other);
++                }
++            }
++            if let Some(ps) = frame.player_mut(id) {
++                if lethal(eq.offhand_class) {
++                    ps.offhand_primary = eq.offhand_class;
++                } else {
++                    ps.offhand_secondary = eq.offhand_class;
++                }
++            }
++        }
++        bridge_ammo(&mut frame, id, weapon, clip, stock);
++        true
++    }
++
++    /// RE4 bridge: the MW2 player cannot die; the host's own character owns health.
++    pub fn bridge_god(&mut self, id: ClientId) {
++        let mut frame = self.frame();
++        let alive = frame
++            .client_meta(id)
++            .is_some_and(|m| m.lifecycle == crate::ClientLifecycle::Alive && !m.god_mode);
++        if alive {
++            frame.client_meta_mut(id).god_mode = true;
++            diag::info!(Sim, "RE4 bridge: god mode on for client {}", id.0);
++        }
++    }
++
+     /// Fires the fuse of this client's live projectile on the next tick, for
+     /// host-detected triggers (a host actor crossing a planted claymore).
+     pub fn detonate_projectile(&mut self, owner: ClientId, id: u32) -> bool {

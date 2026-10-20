@@ -17,3 +17,5 @@ account.dat
 *.log
 *.bak
 *.lnk
+/iw4l-source/
+/runtime-build/
