@@ -153,3 +153,9 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   '1' arms the next gun in the case. Hits use WeaponId2WeaponNo(item) so firepower upgrades count; F11 multipliers reset to 1.0.
   Gun list overlay while STA_SUB_SCRN is set (attache case; merchant untested). F8/F9 disabled when Re4Inventory=1.
   Not mapped: firing speed and reload speed upgrades (MW2 keeps its own rates).
+
+## v21 (2026-10-20)
+- User test of v20: god mode on, requests applied; bugs: shotgun reload loop (RE4 cap 6 < SPAS clip 8, the v20 'hide reserve' workaround showed 0 reserve and a looping left-hand reload), frag 1 / flash 2 from MW2's class never cleared (offhand count = clip + ammo row; v20 only cleared the clip).
+- Runtime: `sim::world::set_bridge_clip_size(weapon, size)` (process-wide atomic, also used by client prediction) overrides the held gun's clip_size in `combat_facts_for`; kinds 4/5 carry size in Features reserved[3] (BASE+56). Offhand set also empties the ammo row.
+- Plugin: sends RE4 capacity as size; an MW2 reload simply takes (agreed stock - MW2 stock) rounds from the boxes; capacity changes resend. Patch now `runtime-patches/re4-bridge.patch` (diff from snapshot 43e09d1).
+- The user asked about MW2 resolution (it is 960x540 already) and then said not to change it.

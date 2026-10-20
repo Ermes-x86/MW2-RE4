@@ -1,15 +1,17 @@
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..b09d58b 100644
+index 32839dd..1711c51 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
-@@ -481,7 +481,12 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+@@ -481,7 +481,14 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
          bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
          bridge.host_lock = unsafe { memory.read(HOST_LOCK) };
          bridge.features.request = unsafe { memory.read(features::BASE) };
 -        bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
 +        if features::re4_mode() {
-+            // RE4 has no announcer; these two words carry the ammo of requests 4 and 5.
-+            bridge.features.ammo = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
++            // RE4 has no announcer; these three words carry the clip, reserve and clip size of requests 4 and 5.
++            bridge.features.ammo = unsafe {
++                (memory.read(features::BASE + 48), memory.read(features::BASE + 52), memory.read(features::BASE + 56))
++            };
 +        } else {
 +            bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
 +        }
@@ -17,15 +19,15 @@ index 32839dd..b09d58b 100644
      }
      if let Some(_guard) = memory.lock_scene() {
 diff --git a/crates/bootstrap/src/gta_bridge/features.rs b/crates/bootstrap/src/gta_bridge/features.rs
-index c415d3c..89a7639 100644
+index c415d3c..6fc3b2f 100644
 --- a/crates/bootstrap/src/gta_bridge/features.rs
 +++ b/crates/bootstrap/src/gta_bridge/features.rs
 @@ -15,6 +15,8 @@ pub(super) struct Request {
  #[derive(Default)]
  pub(super) struct State {
      pub request: Request,
-+    /// RE4 bridge (IW4L_RE4_BRIDGE): clip and reserve for request kinds 4 and 5.
-+    pub ammo: (i32, i32),
++    /// RE4 bridge (IW4L_RE4_BRIDGE): clip, reserve and clip size for request kinds 4 and 5.
++    pub ammo: (i32, i32, i32),
      received: u32,
      pending: Option<(u32, u32)>,
      ack: u32,
@@ -59,18 +61,18 @@ index c415d3c..89a7639 100644
      bridge.features.received = request.sequence;
 +    if re4 && matches!(request.kind, 4 | 5) {
 +        // 4: hold only `weapon` with this ammo; 5: set `weapon`'s ammo.
-+        let (clip, stock) = bridge.features.ammo;
++        let (clip, stock, size) = bridge.features.ammo;
 +        let applied = if request.kind == 4 {
-+            world.0.bridge_equip(local.0, request.weapon, clip, stock)
++            world.0.bridge_equip(local.0, request.weapon, clip, stock, size)
 +        } else {
-+            world.0.bridge_set_ammo(local.0, request.weapon, clip, stock)
++            world.0.bridge_set_ammo(local.0, request.weapon, clip, stock, size)
 +        };
 +        if applied && request.kind == 4 {
 +            bridge.features.forced_selection = Some(request.weapon);
 +        }
 +        diag::info!(
 +            Launch,
-+            "RE4 inventory request: {} kind={} weapon={} clip={clip} stock={stock} applied={applied}",
++            "RE4 inventory request: {} kind={} weapon={} clip={clip} stock={stock} size={size} applied={applied}",
 +            request.sequence,
 +            request.kind,
 +            request.weapon
@@ -103,10 +105,10 @@ index c415d3c..89a7639 100644
              bridge.features.loadout.save(world, ps);
          }
 diff --git a/crates/sim/src/carrier.rs b/crates/sim/src/carrier.rs
-index 0629207..7e4e6df 100644
+index 0629207..948cd30 100644
 --- a/crates/sim/src/carrier.rs
 +++ b/crates/sim/src/carrier.rs
-@@ -20,6 +20,28 @@ pub struct SimWorld {
+@@ -20,6 +20,27 @@ pub struct SimWorld {
      schedule: bevy_ecs::schedule::Schedule,
  }
  
@@ -121,9 +123,8 @@ index 0629207..7e4e6df 100644
 +    let ammo_key = weapon_iw4::ammo_table_key(facts.ammo_index, weapon);
 +    if let Some(ps) = frame.player_mut(id) {
 +        let _ = weapon_iw4::set_clip_for_hand(&mut ps.ammoclip, clip_key, 0, clip);
-+        if !offhand {
-+            let _ = weapon_iw4::set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock);
-+        }
++        // an offhand's count is its clip plus its ammo row, so the row is emptied
++        let _ = weapon_iw4::set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock);
 +    }
 +    let meta = frame.client_meta_mut(id);
 +    meta.set_ammo(weapon, clip, stock);
@@ -135,14 +136,14 @@ index 0629207..7e4e6df 100644
  impl Default for SimWorld {
      fn default() -> Self {
          let mut ecs = World::new();
-@@ -223,6 +245,81 @@ impl SimWorld {
+@@ -223,6 +244,84 @@ impl SimWorld {
          true
      }
  
 +    /// RE4 bridge: the host game owns the inventory. MW2 holds exactly the
 +    /// host's equipped gun: every other primary is taken, `weapon` is given if
 +    /// missing, its ammo set to the host's and it is raised.
-+    pub fn bridge_equip(&mut self, id: ClientId, weapon: u32, clip: i32, stock: i32) -> bool {
++    pub fn bridge_equip(&mut self, id: ClientId, weapon: u32, clip: i32, stock: i32, size: i32) -> bool {
 +        use crate::script_player::{WeaponList, give_weapon, has_weapon, switch_to_weapon, take_weapon, weapons};
 +        let mut frame = self.frame();
 +        if frame.player(id).is_none() || frame.combat_facts_for(weapon).is_none() {
@@ -156,6 +157,7 @@ index 0629207..7e4e6df 100644
 +        if !has_weapon(&frame, id, weapon) && give_weapon(&mut frame, id, weapon, false).is_err() {
 +            return false;
 +        }
++        crate::world::set_bridge_clip_size(weapon, size);
 +        bridge_ammo(&mut frame, id, weapon, clip, stock);
 +        switch_to_weapon(&mut frame, id, weapon);
 +        true
@@ -164,7 +166,7 @@ index 0629207..7e4e6df 100644
 +    /// RE4 bridge: sets one weapon's clip and reserve to the host's counts,
 +    /// beyond IW4's clip size and max ammo (RE4 capacity upgrades). An offhand
 +    /// (grenade) keeps its count in the clip and is given when it is missing.
-+    pub fn bridge_set_ammo(&mut self, id: ClientId, weapon: u32, clip: i32, stock: i32) -> bool {
++    pub fn bridge_set_ammo(&mut self, id: ClientId, weapon: u32, clip: i32, stock: i32, size: i32) -> bool {
 +        use crate::script_player::{WeaponList, give_weapon, has_weapon, take_weapon, weapons};
 +        let mut frame = self.frame();
 +        if frame.player(id).is_none() || frame.combat_facts_for(weapon).is_none() {
@@ -197,6 +199,8 @@ index 0629207..7e4e6df 100644
 +                    ps.offhand_secondary = eq.offhand_class;
 +                }
 +            }
++        } else if size > 0 {
++            crate::world::set_bridge_clip_size(weapon, size);
 +        }
 +        bridge_ammo(&mut frame, id, weapon, clip, stock);
 +        true
@@ -217,3 +221,41 @@ index 0629207..7e4e6df 100644
      /// Fires the fuse of this client's live projectile on the next tick, for
      /// host-detected triggers (a host actor crossing a planted claymore).
      pub fn detonate_projectile(&mut self, owner: ClientId, id: u32) -> bool {
+diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
+index e9ac812..6d69c85 100644
+--- a/crates/sim/src/world.rs
++++ b/crates/sim/src/world.rs
+@@ -1038,12 +1038,18 @@ impl SimState {
+     }
+ 
+     pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
+-        self.content
++        let mut facts = self
++            .content
+             .weapons()
+             .weapon_combat
+             .get(weapon as usize)
+             .copied()
+-            .filter(|f| f.is_usable())
++            .filter(|f| f.is_usable())?;
++        let clip = BRIDGE_CLIP_SIZE.load(std::sync::atomic::Ordering::Relaxed);
++        if clip != 0 && (clip >> 32) as u32 == weapon && facts.clip_size > 0 {
++            facts.clip_size = clip as u32 as i32;
++        }
++        Some(facts)
+     }
+ 
+     pub(crate) fn can_transition_weapon(&self, from: u32, to: u32) -> bool {
+@@ -3423,3 +3429,12 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
+     ps.corpse_index = -1;
+     ps
+ }
++
++/// RE4 bridge: the clip size of the host's equipped gun (its capacity upgrade), as `weapon << 32 | size`;
++/// 0 = none. Process-wide so the authority and the client prediction reload alike.
++static BRIDGE_CLIP_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++pub fn set_bridge_clip_size(weapon: u32, size: i32) {
++    let value = if size > 0 { (u64::from(weapon) << 32) | u64::from(size as u32) } else { 0 };
++    BRIDGE_CLIP_SIZE.store(value, std::sync::atomic::Ordering::Relaxed);
++}

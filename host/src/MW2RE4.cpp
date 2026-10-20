@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v20 (RE4 attache case guns and ammo, MW2 never dies)";
+constexpr const char* kVersion = "MW2RE4 v21 (RE4 capacity is the MW2 clip size, grenade counts fixed)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -325,7 +325,7 @@ int g_settingsRow = 0;
 bool MenuOpen() { return g_weaponMenu || g_settingsMenu || g_damageMenu; }
 size_t g_selected = 0;
 uint32_t g_request = 0, g_requestKind = 0, g_requestWeapon = 0;
-int32_t g_requestClip = 0, g_requestStock = 0;
+int32_t g_requestClip = 0, g_requestStock = 0, g_requestSize = 0;
 DWORD g_requestTime = 0;
 std::string g_notice;
 DWORD g_noticeUntil = 0;
@@ -1102,8 +1102,10 @@ void Notice(const std::string& text, DWORD ms = 3000)
 }
 
 // kind 1 = give/equip catalog weapon, 2 = refill ammo (MW2-GTA protocol); RE4 runtime mode adds
-// 4 = hold only `weapon` with clip/stock, 5 = set `weapon`'s clip/stock (a grenade's count is its clip)
-bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false, int32_t clip = 0, int32_t stock = 0)
+// 4 = hold only `weapon` with clip/stock, 5 = set `weapon`'s clip/stock (a grenade's count is its clip);
+// size = the gun's clip size in MW2 (RE4 capacity; 0 = MW2's own)
+bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false, int32_t clip = 0, int32_t stock = 0,
+             int32_t size = 0)
 {
     if (g_request && g_features.ack != g_request && GetTickCount() - g_requestTime < 3000)
     {
@@ -1117,6 +1119,7 @@ bool Request(uint32_t kind, uint32_t weapon = 0, bool silent = false, int32_t cl
     g_requestWeapon = weapon;
     g_requestClip = clip;
     g_requestStock = stock;
+    g_requestSize = size;
     g_requestTime = GetTickCount();
     if (!silent)
         Notice(kind == 2 ? "Refilling ammo..." : "Equipping...");
@@ -1565,7 +1568,7 @@ struct Arsenal
     int gun = -1;               // kGuns index
     uint32_t weapon = 0;        // MW2 weapon id
     int clip = -1, stock = -1;  // what MW2 was told
-    bool stockHidden = false;   // MW2's reserve shown as 0 so it stops reloading a full RE4 gun
+    int size = -1;              // MW2 clip size sent (the RE4 gun's capacity)
     int frag = -1, flash = -1;
     uint32_t pending = 0;       // request waiting for its ack
     // after an ack: what MW2 should show before its counts mean anything again (it reports what it displays,
@@ -1579,9 +1582,9 @@ struct Arsenal
     std::string missing;        // MW2 gun name not in MW2's catalog (logged once)
 } g_arm;
 
-bool ArmRequest(uint32_t kind, uint32_t weapon, int clip, int stock, int expect = 1)
+bool ArmRequest(uint32_t kind, uint32_t weapon, int clip, int stock, int expect = 1, int size = 0)
 {
-    if (!Request(kind, weapon, true, clip, stock))
+    if (!Request(kind, weapon, true, clip, stock, size))
         return false;
     g_arm.pending = g_request;
     g_arm.expect = expect;
@@ -1729,7 +1732,8 @@ void ArsenalUpdate(bool focused)
         }
         bool unlimited = Unlimited(eq) || g_cfg.infiniteAmmo;
         int clip = unlimited ? 999 : LoadedFor(eq, want), stock = unlimited ? 0 : Reserve(want);
-        if (!ArmRequest(4, weapon, clip, stock))
+        int size = unlimited ? 0 : std::max(1, Capacity(eq));
+        if (!ArmRequest(4, weapon, clip, stock, 1, size))
             return;
         bool first = !g_arm.weapon;
         g_arm.item = eq;
@@ -1738,10 +1742,10 @@ void ArsenalUpdate(bool focused)
         g_arm.weapon = weapon;
         g_arm.clip = clip;
         g_arm.stock = stock;
-        g_arm.stockHidden = false;
+        g_arm.size = size;
         g_arm.equippedAt = now;
-        Log("arsenal: RE4 %s -> MW2 %s (weapon %u) clip %d reserve %d%s", want->label, g_gunMw2[index].c_str(), weapon,
-            clip, stock, unlimited ? " (unlimited)" : "");
+        Log("arsenal: RE4 %s -> MW2 %s (weapon %u) clip %d of %d, reserve %d%s", want->label, g_gunMw2[index].c_str(),
+            weapon, clip, size, stock, unlimited ? " (unlimited)" : "");
         if (!first)
             Notice(std::string(want->label) + "  =  " + Upper(g_gunMw2[index]), 2500);
         return;
@@ -1771,19 +1775,14 @@ void ArsenalUpdate(bool focused)
         int loaded = LoadedFor(item, gun), reserve = Reserve(gun), cap = std::max(1, Capacity(item));
         if (s < g_arm.stock)
         {
-            // MW2 reloaded: RE4's rule decides how much goes in (up to the capacity upgrade)
-            int base = std::min(g_arm.clip, loaded);
-            int fill = std::clamp(std::min(cap, base + reserve) - base, 0, reserve);
-            fill = TakeItem(gun->ammo, fill);
-            SetLoaded(item, base + fill);
-            reserve -= fill;
-            bool hide = fill == 0; // already full by RE4's rule: stop MW2 from reloading again and again
-            ArmRequest(5, g_arm.weapon, base + fill, hide ? 0 : reserve);
-            g_arm.clip = base + fill; // the boxes are spent: never count this reload twice
-            g_arm.stock = hide ? 0 : reserve;
-            g_arm.stockHidden = hide;
-            Log("arsenal: reload %s %d -> %d of %d, %d left in the case%s", gun->label, base, base + fill, cap, reserve,
-                hide ? " (full)" : "");
+            // MW2 reloaded (its clip size is the RE4 capacity): the rounds it moved come out of the boxes
+            int moved = TakeItem(gun->ammo, g_arm.stock - s);
+            if (gun->ammo != kNoAmmo)
+                SetLoaded(item, c);
+            Log("arsenal: reload %s %d -> %d of %d, took %d from the case, %d left", gun->label, g_arm.clip, c, cap, moved,
+                reserve - moved);
+            g_arm.clip = c; // the boxes are spent: never count this reload twice
+            g_arm.stock = s;
             return;
         }
         if (c < g_arm.clip)
@@ -1792,8 +1791,6 @@ void ArsenalUpdate(bool focused)
                 SetLoaded(item, c); // shots
             loaded = c;
             g_arm.clip = c;
-            if (g_arm.stockHidden)
-                g_arm.stockHidden = false; // MW2 may reload again: show the real reserve
             if (c == 0 && gun->ammo == kNoAmmo && At<uint16_t>(item, re4::Item_id) != 109)
             {
                 // a rocket launcher is used up, as in RE4
@@ -1804,15 +1801,15 @@ void ArsenalUpdate(bool focused)
                 return;
             }
         }
-        int wantStock = g_arm.stockHidden ? 0 : reserve;
         // (not while firing: setting the clip then would hand back the shots fired meanwhile)
-        if ((loaded != g_arm.clip || wantStock != g_arm.stock) && !Down(VK_LBUTTON))
+        if ((loaded != g_arm.clip || reserve != g_arm.stock || cap != g_arm.size) && !Down(VK_LBUTTON))
         {
-            // pickups, the merchant, an RE4-mode reload
-            if (ArmRequest(5, g_arm.weapon, loaded, wantStock))
+            // pickups, the merchant (capacity upgrades too), an RE4-mode reload
+            if (ArmRequest(5, g_arm.weapon, loaded, reserve, 1, cap))
             {
                 g_arm.clip = loaded;
-                g_arm.stock = wantStock;
+                g_arm.stock = reserve;
+                g_arm.size = cap;
             }
             return;
         }
@@ -2073,6 +2070,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
     feature->weapon = g_requestWeapon;
     feature->reserved[1] = (uint32_t)g_requestClip;
     feature->reserved[2] = (uint32_t)g_requestStock;
+    feature->reserved[3] = (uint32_t)g_requestSize; // clip size = the RE4 gun's capacity
     // MW2's accepted shots and explosions, resolved in RE4 after the lock (ResolveShots).
     uint32_t available = g_guest.shots - g_lastShot;
     if (available > ShotCount)
