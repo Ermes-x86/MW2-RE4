@@ -159,3 +159,11 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 - Runtime: `sim::world::set_bridge_clip_size(weapon, size)` (process-wide atomic, also used by client prediction) overrides the held gun's clip_size in `combat_facts_for`; kinds 4/5 carry size in Features reserved[3] (BASE+56). Offhand set also empties the ammo row.
 - Plugin: sends RE4 capacity as size; an MW2 reload simply takes (agreed stock - MW2 stock) rounds from the boxes; capacity changes resend. Patch now `runtime-patches/re4-bridge.patch` (diff from snapshot 43e09d1).
 - The user asked about MW2 resolution (it is 960x540 already) and then said not to change it.
+
+## v22 (2026-10-20)
+- Ashley/Luis health bar next to Leon's while MW2 has control: partner = pAS (pattern 'A8 02 74 16 8B 15' +6, ptr 0xC57060), shown while
+  its beFlag bit 0 is set; HP = pG+0x4FB8 / +0x4FBA (subHpCur/subHpMax). Label LUIS for model id 0x04, else ASHLEY.
+- Shooting objects: disassembly shows BulletHit (0x686C40) itself handles breakables: it ray-tests the background first (0x594160,
+  walls stop the bullet), then loops EmMgr including object Ems 0x50-0x61 (box 0x53, barrel 0x58, door 0x51, window 0x56, torch 0x57,
+  barred 0x5E...) with per-type handling. Leon's handgun makes no other hit call. MW2 shots already go through it with a 100 m ray,
+  so objects should already break. v22 logs 'shot N hit RE4 Em id: ...' (Ems with cDmgInfo pending) for the first 80 shots to confirm.

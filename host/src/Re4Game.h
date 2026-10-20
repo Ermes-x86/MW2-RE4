@@ -153,6 +153,9 @@ namespace re4
                      Item_levels = 0x6, Item_ammo = 0x8;
     // Item ids (re4_tweaks SDK/item.h EItemId)
     constexpr uint16_t ITEM_GRENADE = 1, ITEM_FLAME_GRENADE = 2, ITEM_FLASH_GRENADE = 14;
+    // pAS: the partner (Ashley, or Luis) cPlayer** at match+6 (Game.cpp); her health is in GLOBAL_WK
+    constexpr Pattern kPartnerPtr { "pAS", "A8 02 74 16 8B 15", 6, false };
+    constexpr size_t G_subHp = 0x4FB8, G_subHpMax = 0x4FBA; // int16 (re4_tweaks subHpCur_4FB8 / subHpMax_4FBA)
     // QTE active byte (QTEFixes.cpp): RE4 is showing a quick-time button prompt
     constexpr Pattern kQteActive  { "QTE active", "C6 05 ? ? ? ? ? E8 ? ? ? ? 83 C4 ? 84 C0 0F 84", 2, false };
     // IDSystem (RE4's 2D interface): m_maxId at +0, ID_UNIT array at +0x50 (Game.cpp, SDK/ID.h)

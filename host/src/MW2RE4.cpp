@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v21 (RE4 capacity is the MW2 clip size, grenade counts fixed)";
+constexpr const char* kVersion = "MW2RE4 v22 (Ashley health bar, shot hit log)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -251,6 +251,7 @@ bool HookThunk(uint8_t* thunk, void* hook, void** orig)
 // ---------------------------------------------------------------- game access
 uint8_t** g_pG = nullptr;      // GLOBAL_WK**
 uint8_t** g_pPL = nullptr;     // cPlayer**
+uint8_t** g_pAS = nullptr;     // cPlayer** partner (Ashley / Luis)
 int32_t* g_mouseX = nullptr;   // DirectInput mouse deltas
 int32_t* g_mouseY = nullptr;
 uint8_t* g_satMgr = nullptr;   // cSatMgr*
@@ -278,6 +279,17 @@ uint8_t* Player()
     if (**(uintptr_t**)g_pPL < 0x10000) // vtable sanity check, as re4_tweaks does
         return nullptr;
     return *g_pPL;
+}
+
+// Ashley (or Luis) while she is with Leon, else null.
+uint8_t* Partner()
+{
+    if (!g_pAS || !*g_pAS || **(uintptr_t**)g_pAS < 0x10000)
+        return nullptr;
+    uint8_t* p = *g_pAS;
+    if (!(At<uint32_t>(p, re4::Unit_beFlag) & 1))
+        return nullptr;
+    return p;
 }
 
 // RE4 (mm, Y up) <-> bridge host space (metres, Z up, same axes as GTA/IW4). A proper rotation,
@@ -869,6 +881,42 @@ int RE4Explosion(Vec3 pos, bool flash)
 }
 
 int ArsenalWeaponNo(uint32_t mw2Weapon);
+
+// Which RE4 things a shot hit: every Em with a hit waiting (enemies, boxes 0x53, barrels 0x58, objects 0x50,
+// doors 0x51, windows 0x56, torches 0x57...). Logged for the first shots only.
+void LogShotTargets(uint32_t sequence)
+{
+    static int logged = 0;
+    if (logged >= 80 || !g_emMgr)
+        return;
+    char ids[200] = "";
+    int n = 0;
+    __try
+    {
+        uint8_t* array = At<uint8_t*>(g_emMgr, re4::Mgr_array);
+        uint32_t count = At<uint32_t>(g_emMgr, re4::Mgr_count), stride = At<uint32_t>(g_emMgr, re4::Mgr_stride);
+        for (uint32_t i = 0; array && i < count && i < 512 && n < 12; ++i)
+        {
+            uint8_t* em = array + i * stride;
+            if ((At<uint32_t>(em, re4::Unit_beFlag) & 1) && (At<uint8_t>(em, re4::Em_dmgFlag) & 1))
+            {
+                size_t len = strlen(ids);
+                snprintf(ids + len, sizeof(ids) - len, " 0x%02X", At<uint8_t>(em, re4::Model_id));
+                ++n;
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return;
+    }
+    if (n)
+    {
+        ++logged;
+        Log("shot %u hit RE4 Em id:%s", sequence, ids);
+    }
+}
+
 void ResolveShots(uint8_t* pl)
 {
     uint32_t shots = g_pendingShots, blasts = g_pendingBlasts;
@@ -894,6 +942,7 @@ void ResolveShots(uint8_t* pl)
                 fit.weapon = no; // exactly the RE4 gun, with its upgrades
         int weapon = fit.weapon;
         int hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
+        LogShotTargets(sh.sequence);
         if (hits > 0)
         {
             g_hitScale = fit.gunClass < GC_COUNT ? g_cfg.damage[fit.gunClass] : 1.f;
@@ -2435,7 +2484,7 @@ struct TextTexture
     IDirect3DTexture9* texture = nullptr;
     UINT width = 0, height = 0;
 };
-TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText, g_damageText, g_gunListText;
+TextTexture g_helpText, g_statusText, g_menuText, g_noticeText, g_hpText, g_settingsText, g_damageText, g_gunListText, g_partnerText;
 
 void ReleaseText(TextTexture& t)
 {
@@ -2736,6 +2785,29 @@ void DrawOverlay(IDirect3DDevice9* device)
                 Quad(device, 0, h * .045f, w * .025f, h * .91f, c);
                 Quad(device, w * .975f, h * .045f, w * .025f, h * .91f, c);
             }
+            if (uint8_t* partner = g ? Partner() : nullptr)
+            {
+                // Ashley's (or Luis's) health, next to Leon's: RE4's own HUD is hidden while MW2 has control
+                int ahp = At<int16_t>(g, re4::G_subHp), ahpMax = std::max<int>(1, At<int16_t>(g, re4::G_subHpMax));
+                float af = std::clamp((float)ahp / ahpMax, 0.f, 1.f);
+                float ax = bx + bw + w * .03f, aw = bw * .75f;
+                device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+                device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+                Quad(device, ax - 3, by - 3, aw + 6, bh + 6, 0xc0181818);
+                Quad(device, ax, by, aw, bh, 0xff505050);
+                if (af > 0)
+                    Quad(device, ax, by, aw * af, bh, af < .3f ? 0xffdf4545 : 0xffe8a0c8);
+                uint8_t id = At<uint8_t>(partner, re4::Model_id);
+                char aText[48];
+                snprintf(aText, sizeof(aText), "%s %d / %d", id == 0x04 ? "LUIS" : "ASHLEY", std::max(0, ahp), ahpMax);
+                if (UpdateText(device, g_partnerText, aText, std::max(10, textPx * 4 / 5)))
+                {
+                    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+                    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+                    Quad(device, ax + 1, by - g_partnerText.height - 2.f, (float)g_partnerText.width, (float)g_partnerText.height, 0xff000000, g_partnerText.texture);
+                    Quad(device, ax, by - g_partnerText.height - 3.f, (float)g_partnerText.width, (float)g_partnerText.height, 0xffffffff, g_partnerText.texture);
+                }
+            }
             char hpText[32];
             snprintf(hpText, sizeof(hpText), "HP %d / %d", std::max(0, hp), hpMax);
             if (UpdateText(device, g_hpText, hpText, std::max(10, textPx * 4 / 5)))
@@ -2974,6 +3046,8 @@ bool Init()
         (void*)g_itemMgr, (void*)g_itemArm, (void*)g_itemErase, (void*)g_chargeNum, (void*)g_weaponNo,
         (void*)g_weaponChange, (void*)g_specialTuned,
         ArsenalReady() ? "MW2 uses RE4's guns and ammo" : "MW2 keeps its own guns (Re4Inventory=0 or a pattern is missing)");
+    if (uint8_t* as = Find(m, re4::kPartnerPtr))
+        g_pAS = *(uint8_t***)as;
     if (uint8_t* ids = Find(m, re4::kIdSys))
         g_idSys = *(uint8_t**)ids;
     if (em)
