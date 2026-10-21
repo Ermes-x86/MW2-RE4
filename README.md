@@ -164,9 +164,22 @@ Which MW2 gun each RE4 gun becomes can be changed in the `[Guns]` section of
 - **"MW2 runtime stopped" or "MW2 startup timed out".** Press F6 to retry. The
   runtime log is `<runtime folder>\iw4l-artifacts\logs\latest.log`; check that
   the `Modern Warfare 2.lnk` shortcut in the runtime folder points to your MW2
-  folder (running the installer again fixes it). When reporting a problem,
-  attach `Resident Evil 4\Bin32\MW2RE4.log` and the newest files in
-  `iw4l-artifacts\logs`.
+  folder (running the installer again fixes it).
+
+## Reporting a bug
+
+[Open an issue](../../issues) and attach:
+
+- `Resident Evil 4\Bin32\MW2RE4.log` (and `MW2RE4.prev.log` if the problem was
+  in the previous session);
+- the newest `.log` files in `<runtime folder>\iw4l-artifacts\logs`;
+- your graphics card, RAM, and whether RE4 runs full screen or windowed.
+
+These logs contain no passwords, IP addresses or account IDs. They do contain
+folder paths, which can include your Windows user name (for example
+`C:\Users\YourName\...`). If you don't want to share it, open the log in
+Notepad and replace it with any word before uploading. **Never attach
+`account.dat`** or any game files.
 - **MW2 is in the way in a special section.** Press F6 to give RE4 full
   control, and F6 again afterwards.
 
@@ -187,7 +200,7 @@ host\Build-ASI.cmd                       # -> host\build\MW2RE4.asi
 # runtime: MW2-GTA's IW4L source with runtime-patches\re4-bridge.patch applied
 $env:CARGO_PROFILE_DEV_DEBUG = '0'; $env:CARGO_PROFILE_DEV_OPT_LEVEL = '1'
 cargo build -p launcher                  # -> <target>\debug\iw4l.exe (shipped as iw4l-re4.exe)
-scripts\Build-Release.ps1 -Version 0.1.0-beta
+scripts\Build-Release.ps1 -Version 0.1.1-beta
 ```
 
 The native and runtime halves share a memory layout (`host/src/Protocol.h` and
