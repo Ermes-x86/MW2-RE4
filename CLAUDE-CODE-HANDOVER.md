@@ -263,3 +263,13 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   full screen and back to windowed after ~5 s, then "MW2 runtime stopped". In bridge mode the runtime has no window
   (WinitPlugin disabled, `bootstrap/src/plugins.rs`), so the mode flicker is RE4's own display; it looks like a GPU
   device loss or a runtime crash. Needs their `Bin32\MW2RE4.log`, the runtime logs and the PC specs.
+
+## v31 (2026-10-21): MW2 resolution in F10
+
+- Like MW2-GTA's options row: F10 has MW2 RESOLUTION (640x360, 800x450, 960x540 default, 1024x576, 1280x720,
+  all 16:9; the shared image holds at most 1280x720, Protocol.h MaxWidth/MaxHeight). Saved as `Resolution=WxH`
+  in MW2RE4.ini (an unknown size snaps to the preset with the nearest width). StartRuntime rewrites only the
+  `resolution=` line of re4-bridge-settings.cfg before launching (WriteRuntimeResolution, MW2-GTA's
+  WriteGuestResolution). The RESTART MW2 row now applies a changed skin or resolution (RestartNeeded()).
+- Going above 1280x720 (e.g. 1920x1080) needs a bigger shared image: Protocol.h and the runtime's MAX_WIDTH /
+  MAX_HEIGHT in gta_bridge.rs together, so a runtime rebuild.

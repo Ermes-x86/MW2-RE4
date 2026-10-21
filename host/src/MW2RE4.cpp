@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v30 (first start may take minutes)";
+constexpr const char* kVersion = "MW2RE4 v31 (MW2 resolution in F10)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -81,7 +81,14 @@ struct Settings
     int uavSeconds = 30, uavCooldown = 60;
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
+    int resolution = 2;        // index into kResolutions: the size MW2 renders at
 } g_cfg;
+
+// MW2's render size, all 16:9 like RE4. The shared image holds up to 1280x720 (Protocol.h). Larger is sharper
+// and costs more GPU time; RE4 stretches the image to its own screen. Takes effect when MW2 starts.
+struct Resolution { uint32_t w, h; };
+const Resolution kResolutions[] = { { 640, 360 }, { 800, 450 }, { 960, 540 }, { 1024, 576 }, { 1280, 720 } };
+constexpr int kResolutionCount = sizeof(kResolutions) / sizeof(kResolutions[0]);
 
 // MW2 picks the player's arms and body from the map's soldier kit, so the skin is chosen by the map MW2
 // loads (only its weapons and soldiers are used; RE4 supplies the world). Takes effect when MW2 starts.
@@ -141,6 +148,12 @@ void LoadSettings()
     g_cfg.infiniteAmmo = GetPrivateProfileIntA("MW2RE4", "InfiniteAmmo", g_cfg.infiniteAmmo, path);
     g_cfg.re4Inventory = GetPrivateProfileIntA("MW2RE4", "Re4Inventory", g_cfg.re4Inventory, path);
     g_cfg.skin = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "Skin", g_cfg.skin, path), 0, kSkinCount - 1);
+    // Resolution=WxH; anything else becomes the preset with the nearest width
+    unsigned rw = 0, rh = 0;
+    if (sscanf(IniString(path, "Resolution", "960x540").c_str(), "%ux%u", &rw, &rh) == 2)
+        for (int i = 0; i < kResolutionCount; ++i)
+            if (abs((int)kResolutions[i].w - (int)rw) < abs((int)kResolutions[g_cfg.resolution].w - (int)rw))
+                g_cfg.resolution = i;
     Log("settings: RuntimeDir=%s RuntimeExecutable=%s RuntimeSettings=%s MappingName=%s ToggleKey=0x%X FOV=%.1f "
         "UnitsPerMeter=%.1f MouseScale=%.2f CollisionRadius=%.1f HideLeon=%d InvertMouseY=%d",
         g_cfg.runtimeDir.c_str(), g_cfg.runtimeExe.c_str(), g_cfg.settingsFile.c_str(), g_cfg.mappingName.c_str(),
@@ -402,6 +415,39 @@ bool CreateBridge()
 }
 
 int g_runtimeSkin = -1; // skin the running MW2 was started with
+int g_runtimeResolution = -1; // resolution the running MW2 was started with
+
+// MW2 reads its render size from the runtime settings file: rewrite only its resolution line, keeping the rest.
+void WriteRuntimeResolution(const std::wstring& path)
+{
+    FILE* in = _wfopen(path.c_str(), L"rb");
+    if (!in)
+        return;
+    std::string text;
+    char buffer[4096];
+    size_t n;
+    while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0)
+        text.append(buffer, n);
+    fclose(in);
+    const Resolution& r = kResolutions[g_cfg.resolution];
+    std::string wanted = "resolution=" + std::to_string(r.w) + "x" + std::to_string(r.h);
+    size_t at = text.find("resolution=");
+    if (at == std::string::npos)
+        return;
+    size_t end = text.find_first_of("\r\n", at);
+    if (end == std::string::npos)
+        end = text.size();
+    if (text.compare(at, end - at, wanted) == 0)
+        return;
+    text.replace(at, end - at, wanted);
+    FILE* out = _wfopen(path.c_str(), L"wb");
+    if (!out)
+        return;
+    fwrite(text.data(), 1, text.size(), out);
+    fclose(out);
+    Log("MW2 resolution set: %s", wanted.c_str());
+}
+
 bool StartRuntime()
 {
     if (g_child.hProcess)
@@ -419,6 +465,8 @@ bool StartRuntime()
         Log("MW2 runtime not found: %s\\%s", g_cfg.runtimeDir.c_str(), g_cfg.runtimeExe.c_str());
         return false;
     }
+    WriteRuntimeResolution(root + L"\\" + Wide(g_cfg.settingsFile));
+    g_runtimeResolution = g_cfg.resolution;
     SetEnvironmentVariableW(L"IW4L_GTA_BRIDGE", Wide(g_cfg.mappingName).c_str());
     SetEnvironmentVariableW(L"IW4L_RE4_BRIDGE", L"1"); // runtime: god mode, RE4 owns guns and ammo
     SetEnvironmentVariableW(L"WGPU_BACKEND", L"dx12");
@@ -1280,7 +1328,12 @@ void InfiniteAmmo()
 }
 
 void Restore();
-constexpr int kSettingsRows = 5;
+constexpr int kSettingsRows = 6;
+// The skin or the resolution changed since MW2 started: the restart row applies them
+bool RestartNeeded()
+{
+    return g_child.hProcess && (g_runtimeSkin != g_cfg.skin || g_runtimeResolution != g_cfg.resolution);
+}
 void SettingsInput(bool up, bool down, bool left, bool right, bool enter, bool back)
 {
     if (up) g_settingsRow = (g_settingsRow + kSettingsRows - 1) % kSettingsRows;
@@ -1318,10 +1371,22 @@ void SettingsInput(bool up, bool down, bool left, bool right, bool enter, bool b
         }
         break;
     case 4:
-        if (enter && g_child.hProcess && g_runtimeSkin != g_cfg.skin)
+        if (dir)
         {
-            // MW2 loads the new map's soldiers: restart it. RE4 keeps running; MW2 mode returns when ready.
-            Log("restarting MW2 for skin %s", kSkins[g_cfg.skin].name);
+            g_cfg.resolution = std::clamp(g_cfg.resolution + dir, 0, kResolutionCount - 1);
+            char text[32], path[MAX_PATH];
+            snprintf(text, sizeof(text), "%ux%u", kResolutions[g_cfg.resolution].w, kResolutions[g_cfg.resolution].h);
+            snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+            WritePrivateProfileStringA("MW2RE4", "Resolution", text, path);
+        }
+        break;
+    case 5:
+        if (enter && RestartNeeded())
+        {
+            // MW2 loads the new map's soldiers and render size: restart it. RE4 keeps running; MW2 mode returns
+            // when ready.
+            Log("restarting MW2 for skin %s, %ux%u", kSkins[g_cfg.skin].name, kResolutions[g_cfg.resolution].w,
+                kResolutions[g_cfg.resolution].h);
             Restore();
             TerminateProcess(g_child.hProcess, 1);
             WaitForSingleObject(g_child.hProcess, 3000);
@@ -1332,7 +1397,7 @@ void SettingsInput(bool up, bool down, bool left, bool right, bool enter, bool b
             g_guest = {};
             if (!StartRuntime())
                 g_requested = false;
-            Notice("Restarting MW2 with the new skin...", 4000);
+            Notice("Restarting MW2 with the new settings...", 4000);
         }
         break;
     }
@@ -1352,9 +1417,11 @@ std::string SettingsText()
     snprintf(rows[1], 160, "MOUSE SENSITIVITY  %s  %.1f", bar((g_cfg.mouseScale - .1f) / 4.9f).c_str(), g_cfg.mouseScale);
     snprintf(rows[2], 160, "INFINITE AMMO      %s", g_cfg.infiniteAmmo ? "ON" : "OFF");
     snprintf(rows[3], 160, "SKIN               < %s >", kSkins[g_cfg.skin].name);
-    snprintf(rows[4], 160, "%s", g_runtimeSkin == g_cfg.skin || !g_child.hProcess
-                                     ? "RESTART MW2          (not needed)"
-                                     : "RESTART MW2 NOW      Enter: applies the new skin (MW2 loads again)");
+    const Resolution& res = kResolutions[g_cfg.resolution];
+    snprintf(rows[4], 160, "MW2 RESOLUTION     < %ux%u >%s", res.w, res.h,
+             g_cfg.resolution == 2 ? "  (default)" : g_cfg.resolution > 2 ? "  (sharper, slower)" : "  (faster)");
+    snprintf(rows[5], 160, "%s", !RestartNeeded() ? "RESTART MW2          (not needed)"
+                                                  : "RESTART MW2 NOW      Enter: applies skin and resolution (MW2 loads again)");
     std::string t = "MW2 SETTINGS   Up/Down select   Left/Right change   F10 close\n\n";
     for (int i = 0; i < kSettingsRows; ++i)
     {
@@ -2777,7 +2844,7 @@ const char* kHelp =
     "V  melee          E  use: doors, items\n"
     "Guns and ammo: Leon's attache case\n"
     "F5  gun list in the case (on / off)\n"
-    "F10  settings: FOV, mouse, ammo, skin\n"
+    "F10  settings: FOV, mouse, ammo, skin, resolution\n"
     "F11  gun damage\n"
     "U  UAV radar (shows Ganados)\n"
     "RE4 inventory, map and menu keys work\n"

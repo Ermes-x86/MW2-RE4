@@ -117,8 +117,14 @@ prepares MW2 assets and takes about a minute.
 | RE4 keys | Attache case, map, menus and Ashley's commands work as in RE4 |
 | F5 | Show or hide the RE4 -> MW2 gun list in the case and at the merchant |
 | F7 | Show or hide the controls panel |
-| F10 | Settings: field of view, mouse sensitivity, infinite ammo, MW2 character skin |
+| F10 | Settings: field of view, mouse sensitivity, infinite ammo, MW2 character skin, MW2 resolution |
 | F11 | Gun damage multipliers per class (1.0 = exactly the RE4 gun's damage) |
+
+**MW2 resolution.** MW2's gun and HUD are drawn at 960x540 by default and
+stretched to RE4's screen. In F10, set MW2 RESOLUTION from 640x360 (fastest)
+to 1280x720 (sharpest), then select RESTART MW2 NOW and press Enter. It is
+saved as `Resolution=` in `MW2RE4.ini`. Choose a lower one if the game
+stutters.
 
 Which MW2 gun each RE4 gun becomes can be changed in the `[Guns]` section of
 `Resident Evil 4\Bin32\MW2RE4.ini`.
