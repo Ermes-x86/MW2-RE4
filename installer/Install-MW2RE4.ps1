@@ -49,11 +49,22 @@ function Resolve-Re4([string]$dir) {
     }
     return $null
 }
+# MW2 only: MW3, Black Ops and Black Ops II also have zone\<language>\common_mp.ff, so the fastfile's version
+# must be MW2's (IW4, 0x114), as the runtime itself checks. Other Call of Duty folders are never used.
 function Test-Mw2([string]$dir) {
     if (-not $dir) { return $false }
     $zone = Join-Path $dir 'zone'
     if (-not (Test-Path $zone)) { return $false }
-    return [bool](Get-ChildItem -Path $zone -Filter 'common_mp.ff' -Recurse -Depth 1 -ErrorAction SilentlyContinue | Select-Object -First 1)
+    foreach ($ff in @(Get-ChildItem -Path $zone -Filter 'common_mp.ff' -Recurse -Depth 1 -File -ErrorAction SilentlyContinue)) {
+        try {
+            $stream = [IO.File]::OpenRead($ff.FullName)
+            try {
+                $header = New-Object byte[] 12
+                if ($stream.Read($header, 0, 12) -eq 12 -and [BitConverter]::ToUInt32($header, 8) -eq 0x114) { return $true }
+            } finally { $stream.Dispose() }
+        } catch {}
+    }
+    return $false
 }
 function Steam-Libraries {
     $roots = @()
@@ -169,8 +180,8 @@ if ($exe.Length -ne $re4Exe) {
 # --- Modern Warfare 2 ------------------------------------------------------
 if (-not (Test-Mw2 $Mw2Dir)) {
     if ($Mw2Dir) {
-        if ($Yes -or $DetectOnly) { throw "$Mw2Dir has no zone\<language>\common_mp.ff (MW2 multiplayer data)." }
-        Say "$Mw2Dir has no zone\<language>\common_mp.ff (MW2 multiplayer data)." Red
+        if ($Yes -or $DetectOnly) { throw "$Mw2Dir is not Modern Warfare 2 (2009): no MW2 zone\<language>\common_mp.ff (MW3, Black Ops and Black Ops II are not used)." }
+        Say "$Mw2Dir is not Modern Warfare 2 (2009): no MW2 zone\<language>\common_mp.ff (MW3, Black Ops and Black Ops II are not used)." Red
     } else {
         $Mw2Dir = Steam-Libraries | ForEach-Object { Join-Path $_ 'steamapps\common\Call of Duty Modern Warfare 2' } |
             Where-Object { Test-Mw2 $_ } | Select-Object -First 1
@@ -184,7 +195,7 @@ if (-not (Test-Mw2 $Mw2Dir)) {
         Say 'Select your Call of Duty: Modern Warfare 2 (2009) folder (contains the "zone" folder).' Yellow
         $Mw2Dir = Pick-Folder 'Select the Modern Warfare 2 (2009) folder (contains zone\...\common_mp.ff)' $Mw2Dir
         if (-not $Mw2Dir) { throw 'Installation cancelled: no Modern Warfare 2 folder selected.' }
-        if (-not (Test-Mw2 $Mw2Dir)) { Say 'That folder has no zone\<language>\common_mp.ff (MW2 multiplayer data).' Red }
+        if (-not (Test-Mw2 $Mw2Dir)) { Say 'That folder is not Modern Warfare 2 (2009): no MW2 zone\<language>\common_mp.ff (MW3, Black Ops and Black Ops II are not used).' Red }
     }
 }
 

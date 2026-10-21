@@ -215,3 +215,7 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   update, uninstall; the installed runtime loaded MW2 through the shortcut and reported ready in 73 s.
 - The runtime contains `C:\Users\<name>\.cargo` paths (Rust panic locations), as MW2-GTA's release does, so the
   package is built with `-KeepLocalPaths`. Removing them needs a runtime rebuild with `--remap-path-prefix`.
+- MW2 only: the runtime already carries MW2-GTA's fix (9e72af1 there: `discover::mw2_only()` when IW4L_GTA_BRIDGE is
+  set, so no MW3/BO/BO2 shortcuts are linked or searched; the RE4 plugin sets that variable). The installer accepts a
+  folder only when `zone\<lang>\common_mp.ff` has MW2's fastfile version 0x114 (MW3 0x1, BO 0x1d9, BO2 0x93 are
+  refused). Tested with fake MW3/BO2 folders.
