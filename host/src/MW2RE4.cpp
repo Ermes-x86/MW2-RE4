@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v22 (Ashley health bar, shot hit log)";
+constexpr const char* kVersion = "MW2RE4 v23 (ammo always follows the attache case)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -1628,6 +1628,7 @@ struct Arsenal
     DWORD expectSince = 0, expectFor = 0;
     DWORD equippedAt = 0;
     DWORD runtimeStarted = 0;
+    DWORD gunMismatchSince = 0, fragMismatchSince = 0, flashMismatchSince = 0; // self-correction timers
     std::string missing;        // MW2 gun name not in MW2's catalog (logged once)
 } g_arm;
 
@@ -1703,11 +1704,54 @@ void NextGun()
         SafeArm(next);
 }
 
+// MW2 -> RE4: shots and reloads MW2 made with the gun it holds are spent from that RE4 gun and its boxes.
+// Sends nothing, so it also runs while RE4 has control (MW2's counts are then frozen) and right before a
+// gun change, so the old gun's last shots are never lost. Returns false when the gun left the case.
+bool Account(bool active)
+{
+    if (!g_arm.item || g_guest.reserved[0] != g_arm.weapon || g_arm.gun < 0)
+        return true;
+    uint8_t* item = g_arm.item;
+    if (!ItemValid(item, g_arm.itemId) || Unlimited(item) || g_cfg.infiniteAmmo)
+        return true;
+    const GunMap* gun = &kGuns[g_arm.gun];
+    int c = g_guest.clip, s = g_guest.stock;
+    if (s < g_arm.stock)
+    {
+        // MW2 reloaded (its clip size is the RE4 capacity): the rounds it moved come out of the boxes
+        int moved = TakeItem(gun->ammo, g_arm.stock - s);
+        if (gun->ammo != kNoAmmo)
+            SetLoaded(item, c);
+        Log("arsenal: reload %s %d -> %d, took %d from the case, %d left", gun->label, g_arm.clip, c, moved, Reserve(gun));
+        g_arm.clip = c; // the boxes are spent: never count this reload twice
+        g_arm.stock = s;
+        return true;
+    }
+    if (c < g_arm.clip)
+    {
+        if (gun->ammo != kNoAmmo)
+            SetLoaded(item, c); // shots
+        g_arm.clip = c;
+        if (c == 0 && gun->ammo == kNoAmmo && At<uint16_t>(item, re4::Item_id) != 109)
+        {
+            // a rocket launcher is used up, as in RE4
+            Log("arsenal: %s fired, removed from the case", gun->label);
+            SafeErase(item);
+            g_arm.item = nullptr;
+            if (active)
+                NextGun();
+            return false;
+        }
+    }
+    return true;
+}
+
 void ArsenalUpdate(bool focused)
 {
-    static bool nextWas = false;
+    static bool nextWas = false, nextQueued = false; // '1' is kept until the arsenal is free to act on it
     bool next = focused && g_active && !MenuOpen() && Down('1');
-    bool nextPressed = next && !nextWas;
+    if (next && !nextWas)
+        nextQueued = true;
     nextWas = next;
     if (!ArsenalReady())
         return;
@@ -1717,10 +1761,17 @@ void ArsenalUpdate(bool focused)
         fresh.runtimeStarted = g_runtimeStarted;
         g_arm = fresh;
     }
-    if (!g_active || !g_guest.ready || g_catalogAll.empty())
+    if (!g_guest.ready || g_catalogAll.empty())
         return;
-    if (nextPressed)
-        NextGun();
+    if (!g_active)
+    {
+        // RE4 has control: MW2 cannot shoot, but its last shots before the hand-over still count
+        if (!g_arm.pending && !g_arm.expect)
+            Account(false);
+        g_arm.gunMismatchSince = g_arm.fragMismatchSince = g_arm.flashMismatchSince = 0;
+        nextQueued = false;
+        return;
+    }
     DWORD now = GetTickCount();
     if (g_arm.pending)
     {
@@ -1757,6 +1808,15 @@ void ArsenalUpdate(bool focused)
                 g_guest.clip, g_guest.stock, g_features.lethalAmmo, g_features.tacticalAmmo, g_arm.expectWeapon,
                 g_arm.expectClip, g_arm.expectStock);
         g_arm.expect = 0;
+    }
+    // MW2's shots and reloads first, so a gun change below never loses the old gun's last shots
+    if (!Account(true))
+        return;
+    if (nextQueued)
+    {
+        nextQueued = false;
+        NextGun();
+        return;
     }
 
     // 1. The gun: Leon's equipped RE4 gun (a knife or grenade in his hands keeps the last gun).
@@ -1822,36 +1882,28 @@ void ArsenalUpdate(bool focused)
             return;
         }
         int loaded = LoadedFor(item, gun), reserve = Reserve(gun), cap = std::max(1, Capacity(item));
-        if (s < g_arm.stock)
+        bool firing = Down(VK_LBUTTON);
+        // Self-correction: what MW2 shows must be the case's counts. A difference that lasts 1.5 s (not while
+        // firing) is fixed from the case.
+        bool off = c != loaded || s != reserve;
+        if (!off || firing)
+            g_arm.gunMismatchSince = 0;
+        else if (!g_arm.gunMismatchSince)
+            g_arm.gunMismatchSince = now;
+        if (g_arm.gunMismatchSince && now - g_arm.gunMismatchSince > 1500)
         {
-            // MW2 reloaded (its clip size is the RE4 capacity): the rounds it moved come out of the boxes
-            int moved = TakeItem(gun->ammo, g_arm.stock - s);
-            if (gun->ammo != kNoAmmo)
-                SetLoaded(item, c);
-            Log("arsenal: reload %s %d -> %d of %d, took %d from the case, %d left", gun->label, g_arm.clip, c, cap, moved,
-                reserve - moved);
-            g_arm.clip = c; // the boxes are spent: never count this reload twice
-            g_arm.stock = s;
+            Log("arsenal: MW2 shows %s %d / %d but the case has %d / %d: fixing", gun->label, c, s, loaded, reserve);
+            g_arm.gunMismatchSince = 0;
+            if (ArmRequest(5, g_arm.weapon, loaded, reserve, 1, cap))
+            {
+                g_arm.clip = loaded;
+                g_arm.stock = reserve;
+                g_arm.size = cap;
+            }
             return;
         }
-        if (c < g_arm.clip)
-        {
-            if (gun->ammo != kNoAmmo)
-                SetLoaded(item, c); // shots
-            loaded = c;
-            g_arm.clip = c;
-            if (c == 0 && gun->ammo == kNoAmmo && At<uint16_t>(item, re4::Item_id) != 109)
-            {
-                // a rocket launcher is used up, as in RE4
-                Log("arsenal: %s fired, removed from the case", gun->label);
-                SafeErase(item);
-                g_arm.item = nullptr;
-                NextGun();
-                return;
-            }
-        }
         // (not while firing: setting the clip then would hand back the shots fired meanwhile)
-        if ((loaded != g_arm.clip || reserve != g_arm.stock || cap != g_arm.size) && !Down(VK_LBUTTON))
+        if ((loaded != g_arm.clip || reserve != g_arm.stock || cap != g_arm.size) && !firing)
         {
             // pickups, the merchant (capacity upgrades too), an RE4-mode reload
             if (ArmRequest(5, g_arm.weapon, loaded, reserve, 1, cap))
@@ -1884,9 +1936,17 @@ void ArsenalUpdate(bool focused)
             grenades = std::max(0, grenades - thrown);
             g_arm.frag = std::max(0, g_features.lethalAmmo);
         }
-        if (grenades != g_arm.frag && ArmRequest(5, fragWeapon, grenades, 0, 2))
+        if (g_features.lethalAmmo == grenades)
+            g_arm.fragMismatchSince = 0;
+        else if (!g_arm.fragMismatchSince)
+            g_arm.fragMismatchSince = now;
+        bool fix = g_arm.fragMismatchSince && now - g_arm.fragMismatchSince > 1500;
+        if ((grenades != g_arm.frag || fix) && ArmRequest(5, fragWeapon, grenades, 0, 2))
         {
+            if (fix)
+                Log("arsenal: MW2 shows %d frags but the case has %d grenades: fixing", g_features.lethalAmmo, grenades);
             g_arm.frag = grenades;
+            g_arm.fragMismatchSince = 0;
             return;
         }
     }
@@ -1899,8 +1959,18 @@ void ArsenalUpdate(bool focused)
             flashes = std::max(0, flashes - thrown);
             g_arm.flash = std::max(0, g_features.tacticalAmmo);
         }
-        if (flashes != g_arm.flash && ArmRequest(5, flashWeapon, flashes, 0, 3))
+        if (g_features.tacticalAmmo == flashes)
+            g_arm.flashMismatchSince = 0;
+        else if (!g_arm.flashMismatchSince)
+            g_arm.flashMismatchSince = now;
+        bool fix = g_arm.flashMismatchSince && now - g_arm.flashMismatchSince > 1500;
+        if ((flashes != g_arm.flash || fix) && ArmRequest(5, flashWeapon, flashes, 0, 3))
+        {
+            if (fix)
+                Log("arsenal: MW2 shows %d flashes but the case has %d: fixing", g_features.tacticalAmmo, flashes);
             g_arm.flash = flashes;
+            g_arm.flashMismatchSince = 0;
+        }
     }
 }
 

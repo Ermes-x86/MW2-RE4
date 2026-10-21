@@ -167,3 +167,9 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   walls stop the bullet), then loops EmMgr including object Ems 0x50-0x61 (box 0x53, barrel 0x58, door 0x51, window 0x56, torch 0x57,
   barred 0x5E...) with per-type handling. Leon's handgun makes no other hit call. MW2 shots already go through it with a 100 m ray,
   so objects should already break. v22 logs 'shot N hit RE4 Em id: ...' (Ems with cDmgInfo pending) for the first 80 shots to confirm.
+
+## v23 (2026-10-21)
+- Verification of v20 log: reload/pickup arithmetic was correct; the HUD mismatch was the v20 hidden reserve (gone in v21).
+- `Account()` (MW2 -> RE4: shots, reloads, used-up rocket launcher) now runs first every frame, before a gun change, and also while RE4 has control (MW2 counts frozen), so the last shots before a switch or hand-over are spent.
+- Self-correction: if MW2 clip/reserve differ from the case (gun loaded ammo / boxes) for 1.5 s while not firing, or frag/flash counts differ from the case for 1.5 s, the case values are sent again (log "fixing").
+- Key 1 is queued while a request is in flight.
