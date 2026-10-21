@@ -285,3 +285,18 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   (MiniDumpWithIndirectlyReferencedMemory). The filter is installed at load and again at the first Present
   (bio4.exe sets its own at 0x0040C989, another DLL one later); the filter it replaced still runs after it
   (g_previousFilter), with a guard against filters calling each other. The uninstaller removes the dump.
+
+## Subscriber report 2 (2026-10-21): MW2 never draws, then aborts
+
+- Fresh 0.1.2 install (RE4 under Program Files, runtime in %LOCALAPPDATA%\MW2RE4, windowed 1280x720). MW2 ready
+  after 258 s (the v30 limit worked). Then movement and camera ran at ~40 Hz but `frame=0 0x0` the whole time (on
+  this PC frames arrive at once, ~50/s), the runtime stalled after ~12 s and exited 0xC0000409 (fail-fast abort).
+- Their runtime log loads exactly like ours up to "GPU ready" and admission; it ends without an error (the abort
+  message goes to stderr, which the plugin does not capture). The readback (`gta_bridge/readback.rs`) never
+  completed a map_async, so the GPU most likely hung (TDR), which also fits the full-screen/windowed flicker of
+  their first report. Asked for GPU model, driver and RAM.
+- Tried a `Renderer=vulkan` option (WGPU_BACKEND; the exe does include Vulkan): on this PC Vulkan fails during
+  loading with "Validation Error ... Texture is invalid" then "Quitting the application due to OutOfMemory
+  RenderError", so it is not a workaround without runtime work. The option was reverted, not shipped.
+- Idea for later: start the runtime with stderr redirected to a file (e.g. `iw4l-artifacts\logs\stderr.log`) so a
+  user's abort reason reaches the logs they send.
