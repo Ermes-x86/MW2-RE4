@@ -249,3 +249,17 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   installed INI was backed up to builds\MW2RE4.ini.before-v29.bak). README "Known limitations" says so.
 - To bring it back: an MW2 projectile that sticks and detonates (e.g. the m79 round made sticky on impact in the
   runtime, then detonated by RE4's own mine logic or a timer).
+
+## v30 (2026-10-21): first start may take minutes
+
+- A subscriber's fresh install timed out: "MW2 loading" ran to ~200 s, then "MW2 startup timed out" just as the
+  MW2 menu sound played. A fresh runtime has no `iw4l-artifacts\cache` (here 1.1 GB: mips 970 MB, wgsl 59 MB,
+  ~2,100 pipelines), so the first start on a slow CPU or HDD runs past the old 180 s limit. Cache entries are
+  written to a temp file and renamed (`asset_transport/src/artifact_cache.rs`), so a kill keeps what was built,
+  which is why a later retry got through.
+- WatchRuntime: the first-start limit is 900 s (was 180 s); the 15 s "connection lost" limit after READY is
+  unchanged. After 60 s the loading text adds "the first start can take several minutes".
+- Same report, not solved yet (no logs): after one successful start the player was invisible, the screen went
+  full screen and back to windowed after ~5 s, then "MW2 runtime stopped". In bridge mode the runtime has no window
+  (WinitPlugin disabled, `bootstrap/src/plugins.rs`), so the mode flicker is RE4's own display; it looks like a GPU
+  device loss or a runtime crash. Needs their `Bin32\MW2RE4.log`, the runtime logs and the PC specs.

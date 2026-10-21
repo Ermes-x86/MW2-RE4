@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v29 (Mine Thrower left to RE4 for now)";
+constexpr const char* kVersion = "MW2RE4 v30 (first start may take minutes)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -490,7 +490,9 @@ void WatchRuntime()
     }
     if (!g_unreadySince)
         g_unreadySince = now;
-    if (now - g_unreadySince < (g_runtimeWasReady ? 15000u : 180000u))
+    // The first start on a PC builds about 1 GB of texture cache and compiles the shaders, which takes minutes
+    // on a slow CPU or disk. The cache survives a kill, but killing it early only makes the player wait longer.
+    if (now - g_unreadySince < (g_runtimeWasReady ? 15000u : 900000u))
         return;
     g_runtimeError = g_runtimeWasReady ? "MW2 connection lost" : "MW2 startup timed out";
     Log("%s. F6 to retry", g_runtimeError.c_str());
@@ -2787,8 +2789,13 @@ std::string StatusText()
     if (!g_runtimeError.empty() && !g_requested) return "MW2: " + g_runtimeError + " - press F6 to retry";
     if (!g_requested) return "";
     if (g_guest.ready && GetTickCount() - g_guest.tick < 1500) return "MW2 ready - waiting for RE4 gameplay";
-    char text[96];
-    snprintf(text, sizeof(text), "MW2 loading... %lus  (F6 cancels)", (GetTickCount() - g_runtimeStarted) / 1000);
+    char text[128];
+    DWORD seconds = (GetTickCount() - g_runtimeStarted) / 1000;
+    if (seconds < 60)
+        snprintf(text, sizeof(text), "MW2 loading... %lus  (F6 cancels)", seconds);
+    else
+        snprintf(text, sizeof(text), "MW2 loading... %lus  (the first start can take several minutes, F6 cancels)",
+                 seconds);
     return text;
 }
 

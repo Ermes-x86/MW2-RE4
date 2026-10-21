@@ -156,10 +156,17 @@ Which MW2 gun each RE4 gun becomes can be changed in the `[Guns]` section of
 - **Nothing happens on F6.** Check that `dinput8.dll` and `MW2RE4.asi` are in
   `Resident Evil 4\Bin32` and that `MW2RE4.log` appears there after starting
   the game.
+- **The first start is slow.** The first time, the mod builds about 1 GB of
+  MW2 texture and shader cache in `<runtime folder>\iw4l-artifacts\cache`.
+  That can take several minutes on a slower CPU or a hard drive; later starts
+  take about a minute. Keep the game running until it is ready. If it is
+  stopped, the part already built is kept, so the next try is faster.
 - **"MW2 runtime stopped" or "MW2 startup timed out".** Press F6 to retry. The
   runtime log is `<runtime folder>\iw4l-artifacts\logs\latest.log`; check that
   the `Modern Warfare 2.lnk` shortcut in the runtime folder points to your MW2
-  folder (running the installer again fixes it).
+  folder (running the installer again fixes it). When reporting a problem,
+  attach `Resident Evil 4\Bin32\MW2RE4.log` and the newest files in
+  `iw4l-artifacts\logs`.
 - **MW2 is in the way in a special section.** Press F6 to give RE4 full
   control, and F6 again afterwards.
 
