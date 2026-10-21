@@ -45,6 +45,8 @@ namespace re4
     constexpr size_t G_plHpMax     = 0x4FB6; // int16
     constexpr size_t G_plType      = 0x4FC8; // uint8, 0 = Leon
     constexpr size_t G_statusFlags = 0x501C; // Flags_STATUS word 0
+    constexpr size_t G_statusFlags1 = 0x5020; // Flags_STATUS word 1
+    constexpr uint32_t STA1_ITEM_GET = 0x00000002; // word 1: RE4's item pickup screen is up
 
     // Flag bits (GameFlags.h): flag n is bit (0x80000000 >> n) of its word.
     constexpr uint32_t DPF_PL         = 0x40000000; // set = player model hidden (seen 0 normally)

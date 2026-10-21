@@ -219,3 +219,14 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   set, so no MW3/BO/BO2 shortcuts are linked or searched; the RE4 plugin sets that variable). The installer accepts a
   folder only when `zone\<lang>\common_mp.ff` has MW2's fastfile version 0x114 (MW3 0x1, BO 0x1d9, BO2 0x93 are
   refused). Tested with fake MW3/BO2 folders.
+
+## v27 (2026-10-21): RE4's item pickup screen
+
+- Bug (v26): on RE4's "take it?" pickup screen, MW2's hand stayed drawn over it (v26 even kept it for 1.5 s on
+  purpose) and the screen's text stayed raised. That screen does not stop the camera hook and sets none of the
+  STA_SUSPEND bits, so MW2 stayed fully in control.
+- Fix: `ItemGetOpen()` = Flags_STATUS word 1 (G+0x5020) bit STA_ITEM_GET (0x2, re4_tweaks GameFlags). While it is
+  set: no MW2 overlay, no caption raise, `RestorePrompts()` instead of `RaisePrompts()`, all keys to RE4
+  (`PadReadHook` returns early), `host.enabled = 0`. MW2 keeps Leon (hidden), so there is no hand-over flash.
+  The v26 "keep MW2's image through a pickup freeze" exception is removed. The log shows
+  "RE4 item pickup screen open/closed (N ms after E)".

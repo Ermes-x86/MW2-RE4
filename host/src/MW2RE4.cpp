@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v26 (no Leon flash on pickups)";
+constexpr const char* kVersion = "MW2RE4 v27 (pickup screen: MW2 hand off, RE4 text in place)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -735,6 +735,15 @@ const char* Re4ScreenBlocker()
     return nullptr;
 }
 
+// RE4's item pickup screen ("take it?"): it does not pause RE4 or set any screen flag above, so MW2 keeps Leon
+// (hidden, no hand-over flash) but steps out of the way: no MW2 hand, RE4's text and windows in their own place,
+// every key to RE4 and none to MW2.
+bool ItemGetOpen()
+{
+    uint8_t* g = Global();
+    return g && (At<uint32_t>(g, re4::G_statusFlags1) & re4::STA1_ITEM_GET);
+}
+
 const char* Blocker(uint8_t* g, uint8_t* pl)
 {
     if (!g_requested) return "off";
@@ -1086,7 +1095,7 @@ MesSetFn g_mesSetOrig = nullptr;
 bool __fastcall MesSetHook(void* self, void* edx, uint32_t num, int px, int py, uint32_t attr, int wk, uint8_t col,
                            int font)
 {
-    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f && !Re4ScreenBlocker())
+    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f && !Re4ScreenBlocker() && !ItemGetOpen())
     {
         static int logged = 0;
         if (logged < 20 && ++logged)
@@ -2258,7 +2267,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
 
     DWORD now = GetTickCount();
     g_host.tick = now;
-    g_host.enabled = g_active && !MenuOpen() ? 1 : 0;
+    g_host.enabled = g_active && !MenuOpen() && !ItemGetOpen() ? 1 : 0;
     g_host.yaw = g_yaw;
     g_host.pitch = g_pitch;
     g_host.fov = g_cfg.fov;
@@ -2407,6 +2416,8 @@ void __cdecl PadReadHook()
         Restore();
         return;
     }
+    if (ItemGetOpen())
+        return;
     // Paused with no screen of its own (an item pickup freezes RE4 for about half a second, the pause menu):
     // MW2 keeps Leon, hidden, and carries on when RE4 does; meanwhile RE4 gets all its keys.
     if (padsWithoutCamera >= 4 && GetTickCount() - g_lastTick > 200)
@@ -2513,7 +2524,14 @@ void __cdecl CameraSetHook(uint8_t* camera)
         g_lastHp = hp;
     }
     ResolveShots(pl);
-    if (g_active)
+    bool itemGet = ItemGetOpen();
+    static bool itemGetWas = false;
+    if (itemGet != itemGetWas)
+        Log("RE4 item pickup screen %s (%lu ms after E)", itemGet ? "open" : "closed", GetTickCount() - g_lastUse);
+    itemGetWas = itemGet;
+    if (g_active && itemGet)
+        RestorePrompts();
+    else if (g_active)
         RaisePrompts();
     if (g_active && pl)
     {
@@ -2765,12 +2783,8 @@ void DrawOverlay(IDirect3DDevice9* device)
         if (lock.acquired)
             ((Control*)g_shared)->host.enabled = 0; // MW2 ignores input while RE4 is paused
     }
-    // The freeze of an item pickup (E pressed just before RE4 stopped, no RE4 screen open): MW2's gun stays
-    // on screen, so picking something up does not blink. Longer pauses (the pause menu) still hide it.
-    DWORD now = GetTickCount();
-    bool pickup = !ticking && g_active && now - g_lastTick < 1500 && g_lastTick - g_lastUse < 1000 &&
-                  !Re4ScreenBlocker();
-    bool drawMw2 = g_active && (ticking || pickup);
+    // RE4's item pickup screen: MW2's hand goes the moment it opens
+    bool drawMw2 = g_active && ticking && !ItemGetOpen();
     uint8_t* gl = Global();
     // F5 shows or hides the gun list (checked here: the case and the merchant stop RE4's camera hook)
     static bool f5WasDown = false;
