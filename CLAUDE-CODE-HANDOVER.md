@@ -240,3 +240,12 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   window back (called from MesSetHook, PadReadHook and the camera hook), all keys go to RE4, host.enabled = 0.
   Other captions keep the raise. Logs: "pickup screen: RE4 stopped N ms after E (stop flags ..., status ...)",
   "pickup caption ... kept at (x, y)", "pickup screen closed".
+
+## v29 (2026-10-21): Mine Thrower left to RE4
+
+- The Mine Thrower's mines stick and then explode; MW2's m79 (Thumper) only fires grenades, so the mapping did not
+  work. Its kGuns entries (items 54 and 171) are removed, like the P.R.L. 412, which never had one: equipping either
+  keeps the last MW2 gun (and its RE4 ammo), and F6 hands them to Leon. `MineThrower=` is gone from the INIs (the
+  installed INI was backed up to builds\MW2RE4.ini.before-v29.bak). README "Known limitations" says so.
+- To bring it back: an MW2 projectile that sticks and detonates (e.g. the m79 round made sticky on impact in the
+  runtime, then detonated by RE4's own mine logic or a timer).

@@ -132,10 +132,13 @@ Which MW2 gun each RE4 gun becomes can be changed in the `[Guns]` section of
 | Shotgun, Riot Gun, Striker | SPAS-12, M1014, Striker |
 | Rifle, Semi-auto Rifle | Intervention, Barrett .50cal |
 | TMP, Chicago Typewriter | TMP, AK-47 |
-| Rocket Launcher, Mine Thrower | RPG-7, Thumper |
+| Rocket Launcher | RPG-7 |
 
 ## Known limitations
 
+- The **Mine Thrower** and the **P.R.L. 412** have no MW2 gun yet (the Mine
+  Thrower's mines stick and then go off, which no MW2 gun does). Equipping one
+  keeps your last MW2 gun; press F6 to use them as Leon.
 - Firing speed and reload speed upgrades do not change the MW2 gun yet
   (firepower and capacity do).
 - Incendiary grenades and the thermal scope are not adapted yet.

@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v28 (pickup screen text at the bottom)";
+constexpr const char* kVersion = "MW2RE4 v29 (Mine Thrower left to RE4 for now)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -1542,8 +1542,8 @@ const GunMap kGuns[] = {
     { 53, "RocketLauncher", "Rocket Launcher", "rpg", kNoAmmo },
     { 23, "RocketLauncher", "Rocket Launcher (special)", "rpg", kNoAmmo },
     { 109, "RocketLauncher", "Infinite Launcher", "rpg", kNoAmmo },
-    { 54, "MineThrower", "Mine Thrower", "m79", 70 },
-    { 171, "MineThrower", "Mine Thrower (scope)", "m79", 70 },
+    // Not MW2 guns yet (equipping one keeps the last MW2 gun): the Mine Thrower (54, 171), whose mines stick and then
+    // go off, which MW2's Thumper cannot do, and the P.R.L. 412.
 };
 constexpr int kGunCount = sizeof(kGuns) / sizeof(kGuns[0]);
 std::string g_gunMw2[kGunCount]; // MW2 gun per entry, [Guns] in the INI can change it
