@@ -173,3 +173,9 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 - `Account()` (MW2 -> RE4: shots, reloads, used-up rocket launcher) now runs first every frame, before a gun change, and also while RE4 has control (MW2 counts frozen), so the last shots before a switch or hand-over are spent.
 - Self-correction: if MW2 clip/reserve differ from the case (gun loaded ammo / boxes) for 1.5 s while not firing, or frag/flash counts differ from the case for 1.5 s, the case values are sent again (log "fixing").
 - Key 1 is queued while a request is in flight.
+
+## v24 (2026-10-21)
+- Class offhands: the MW2 class gave throwing knives + stun/flash; a set-to-0 for frag/flash did nothing when MW2 lacked that exact weapon. Runtime now takes every same-kind offhand (lethal 1/4/5 or tactical) before setting the host one, even at count 0.
+- False "MW2 loading": after RE4 pauses (case, map, menus) the hook stops, so the guest copy looked >1.5 s old and MW2 restarted (new epoch, pitch reset). Blocker now measures guest age at the last Exchange (g_lastExchange - guest.tick).
+- Activate resumes without a new epoch (same view) when Leon is within 10 cm / 15 deg of MW2 and the break was < 10 s.
+- Doors: IW4 hull is +-15 in (0.76 m); against RE4 geometry the runtime scales x/y by 0.78 (0.6 m, Leon-like) in HostCollision trace/penetrations and the trap/unblock helpers (host_hull_scale, RE4 mode only).

@@ -1,5 +1,5 @@
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..1711c51 100644
+index 32839dd..941e319 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
 @@ -481,7 +481,14 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
@@ -18,6 +18,28 @@ index 32839dd..1711c51 100644
          bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
      }
      if let Some(_guard) = memory.lock_scene() {
+@@ -681,8 +688,8 @@ fn anchor_authority(
+         let origin = ps.origin;
+         let released = scene.release_traps(
+             ps.origin,
+-            [-15.0, -15.0, 0.0],
+-            [15.0, 15.0, maxs_z],
++            [-15.0 * super::gta_collision::host_hull_scale(), -15.0 * super::gta_collision::host_hull_scale(), 0.0],
++            [15.0 * super::gta_collision::host_hull_scale(), 15.0 * super::gta_collision::host_hull_scale(), maxs_z],
+             0x0281_0011,
+             &mut bridge.ghosts,
+         );
+@@ -772,8 +779,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+     direction = direction.map(|d| d / length);
+     match scene.unblock_lift(
+         ps.origin,
+-        [-15.0, -15.0, 0.0],
+-        [15.0, 15.0, hull_maxs_z(&ps)],
++        [-15.0 * super::gta_collision::host_hull_scale(), -15.0 * super::gta_collision::host_hull_scale(), 0.0],
++        [15.0 * super::gta_collision::host_hull_scale(), 15.0 * super::gta_collision::host_hull_scale(), hull_maxs_z(&ps)],
+         0x0281_0011,
+         direction,
+     ) {
 diff --git a/crates/bootstrap/src/gta_bridge/features.rs b/crates/bootstrap/src/gta_bridge/features.rs
 index c415d3c..6fc3b2f 100644
 --- a/crates/bootstrap/src/gta_bridge/features.rs
@@ -104,8 +126,44 @@ index c415d3c..6fc3b2f 100644
          if let Some(ps) = world.player(local) {
              bridge.features.loadout.save(world, ps);
          }
+diff --git a/crates/bootstrap/src/gta_collision.rs b/crates/bootstrap/src/gta_collision.rs
+index 56d4052..7add3de 100644
+--- a/crates/bootstrap/src/gta_collision.rs
++++ b/crates/bootstrap/src/gta_collision.rs
+@@ -373,8 +373,23 @@ impl HostCollision {
+         )
+     }
+ }
++/// RE4 bridge: IW4's player is 30 inches (0.76 m) wide; RE4's doorways are built for Leon, about 0.6 m. Against
++/// host geometry the player's width is scaled to that, so doorways and narrow gaps do not snag.
++pub(crate) fn host_hull_scale() -> f32 {
++    static SCALE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
++    *SCALE.get_or_init(|| if std::env::var_os("IW4L_RE4_BRIDGE").is_some() { 0.78 } else { 1.0 })
++}
++fn slim(mut input: GroundTraceInput) -> GroundTraceInput {
++    let s = host_hull_scale();
++    for i in 0..2 {
++        input.mins[i] *= s;
++        input.maxs[i] *= s;
++    }
++    input
++}
+ impl CollisionBackend for HostCollision {
+     fn penetrations(&self, input: GroundTraceInput, contacts: &mut ContactBuffer) -> Coverage {
++        let input = slim(input);
+         if !input
+             .start
+             .iter()
+@@ -421,6 +436,7 @@ impl CollisionBackend for HostCollision {
+         Coverage::Complete
+     }
+     fn trace(&self, input: GroundTraceInput) -> Trace {
++        let input = slim(input);
+         let mins: [f32; 3] =
+             std::array::from_fn(|i| input.start[i].min(input.end[i]) + input.mins[i] - 0.25);
+         let maxs: [f32; 3] =
 diff --git a/crates/sim/src/carrier.rs b/crates/sim/src/carrier.rs
-index 0629207..948cd30 100644
+index 0629207..10f4cd9 100644
 --- a/crates/sim/src/carrier.rs
 +++ b/crates/sim/src/carrier.rs
 @@ -20,6 +20,27 @@ pub struct SimWorld {
@@ -136,7 +194,7 @@ index 0629207..948cd30 100644
  impl Default for SimWorld {
      fn default() -> Self {
          let mut ecs = World::new();
-@@ -223,6 +244,84 @@ impl SimWorld {
+@@ -223,6 +244,89 @@ impl SimWorld {
          true
      }
  
@@ -172,16 +230,10 @@ index 0629207..948cd30 100644
 +        if frame.player(id).is_none() || frame.combat_facts_for(weapon).is_none() {
 +            return false;
 +        }
-+        if !has_weapon(&frame, id, weapon) {
-+            if clip <= 0 && stock <= 0 {
-+                return true;
-+            }
-+            if give_weapon(&mut frame, id, weapon, false).is_err() {
-+                return false;
-+            }
-+        }
-+        if let Some(eq) = frame.equipment_facts_for(weapon).filter(|eq| eq.is_offhand()) {
-+            // One lethal and one tactical: the host's grenade replaces the class's.
++        let offhand = frame.equipment_facts_for(weapon).filter(|eq| eq.is_offhand());
++        if let Some(eq) = offhand {
++            // One lethal and one tactical, both the host's: any other of the same kind the class gave
++            // (throwing knife, semtex, stun, smoke...) is taken, even when the host has none of its own.
 +            let lethal = |class: i32| matches!(class, 1 | 4 | 5);
 +            for other in weapons(&frame, id, WeaponList::Offhands) {
 +                if other != weapon
@@ -192,6 +244,17 @@ index 0629207..948cd30 100644
 +                    take_weapon(&mut frame, id, other);
 +                }
 +            }
++        }
++        if !has_weapon(&frame, id, weapon) {
++            if clip <= 0 && stock <= 0 {
++                return true;
++            }
++            if give_weapon(&mut frame, id, weapon, false).is_err() {
++                return false;
++            }
++        }
++        if let Some(eq) = offhand {
++            let lethal = |class: i32| matches!(class, 1 | 4 | 5);
 +            if let Some(ps) = frame.player_mut(id) {
 +                if lethal(eq.offhand_class) {
 +                    ps.offhand_primary = eq.offhand_class;

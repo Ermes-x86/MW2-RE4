@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v23 (ammo always follows the attache case)";
+constexpr const char* kVersion = "MW2RE4 v24 (no class grenades/knives, smooth hand-backs, slimmer MW2 body)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -315,6 +315,8 @@ GuestCamera g_guestCamera{};
 bool g_requested = false, g_active = false;
 DWORD g_runtimeStarted = 0, g_unreadySince = 0, g_lastTime = 0;
 bool g_runtimeWasReady = false;
+DWORD g_lastExchange = 0;   // when Exchange last copied the guest state
+DWORD g_inactiveSince = 0;  // when MW2 last handed Leon back to RE4
 std::string g_runtimeError;
 float g_yaw = 0, g_pitch = 0, g_mouseTotalX = 0, g_mouseTotalY = 0;
 uint32_t g_lastShot = 0, g_shotsSeen = 0, g_sceneSequence = 0;
@@ -637,6 +639,7 @@ void Restore()
     }
     RestorePrompts();
     g_active = false;
+    g_inactiveSince = GetTickCount();
     Log("MW2 control off; RE4 has Leon and the camera again");
 }
 
@@ -645,11 +648,26 @@ void Activate(uint8_t* g, uint8_t* pl)
     // Start facing where Leon faces, looking level. RE4's camera is unreliable here: after a cutscene
     // it can still be in front of Leon looking back at him.
     float t = At<Vec3>(pl, re4::Coord_ang).y; // Leon looks along (sin t, 0, cos t); host is (x, -z, y)
-    g_yaw = std::atan2(-std::cos(t), std::sin(t)) * 180 / Pi;
-    g_pitch = 0;
-    if (!++g_hostMovement.epoch)
-        ++g_hostMovement.epoch;
-    ToHost(At<Vec3>(pl, re4::Coord_pos), g_hostMovement.foot);
+    float yaw = std::atan2(-std::cos(t), std::sin(t)) * 180 / Pi;
+    // A short break (menu, a press of E that did nothing, a pause) with Leon still where MW2 left him: MW2 just
+    // carries on, same movement and same view, instead of starting over (that restart was a visible hitch).
+    bool resume = false;
+    if (g_hostMovement.epoch && g_guestMovement.epoch == g_hostMovement.epoch && g_guestMovement.sequence &&
+        GetTickCount() - g_inactiveSince < 10000)
+    {
+        Vec3 leon = At<Vec3>(pl, re4::Coord_pos), mw2 = ToRe4(g_guestMovement.foot);
+        float dx = leon.x - mw2.x, dy = leon.y - mw2.y, dz = leon.z - mw2.z;
+        float turn = std::fabs(std::remainder(yaw - g_yaw, 360.f));
+        resume = dx * dx + dy * dy + dz * dz < 100.f * 100.f && turn < 15.f; // within 10 cm and 15 degrees
+    }
+    if (!resume)
+    {
+        g_yaw = yaw;
+        g_pitch = 0;
+        if (!++g_hostMovement.epoch)
+            ++g_hostMovement.epoch;
+        ToHost(At<Vec3>(pl, re4::Coord_pos), g_hostMovement.foot);
+    }
     g_lastScene = 0;
     uint32_t& disp = At<uint32_t>(g, re4::G_dispFlags);
     g_savedDisp = disp;
@@ -657,8 +675,8 @@ void Activate(uint8_t* g, uint8_t* pl)
         disp |= re4::DPF_PL;  // Leon hidden: first person
     disp |= re4::DPF_COCKPIT; // RE4's HUD hidden: MW2's HUD and the health bar replace it
     g_active = true;
-    Log("MW2 control on: epoch %u, Leon routine %u/%u/%u at (%.0f, %.0f, %.0f), yaw %.1f pitch %.1f, disp flags 0x%08X -> 0x%08X",
-        g_hostMovement.epoch, At<uint8_t>(pl, re4::Model_rno0), At<uint8_t>(pl, re4::Model_rno0 + 1),
+    Log("MW2 control on%s: epoch %u, Leon routine %u/%u/%u at (%.0f, %.0f, %.0f), yaw %.1f pitch %.1f, disp flags 0x%08X -> 0x%08X",
+        resume ? " (resumed)" : "", g_hostMovement.epoch, At<uint8_t>(pl, re4::Model_rno0), At<uint8_t>(pl, re4::Model_rno0 + 1),
         At<uint8_t>(pl, re4::Model_rno0 + 2), At<Vec3>(pl, re4::Coord_pos).x, At<Vec3>(pl, re4::Coord_pos).y,
         At<Vec3>(pl, re4::Coord_pos).z, g_yaw, g_pitch, g_savedDisp, disp);
 }
@@ -703,7 +721,9 @@ const char* ActionBlocker(uint8_t* pl)
 const char* Blocker(uint8_t* g, uint8_t* pl)
 {
     if (!g_requested) return "off";
-    if (!(g_guest.ready && GetTickCount() - g_guest.tick < 1500)) return "MW2 loading";
+    // How old MW2's state was when it was last read, not now: after RE4 was paused (attache case, map, menu)
+    // the copy is old only because RE4 stopped running, and MW2 is still fine.
+    if (!(g_guest.ready && g_lastExchange - g_guest.tick < 1500)) return "MW2 loading";
     if (!g || !pl) return "no player";
     if (At<uint8_t>(g, re4::G_rno0) != 3) return "not in gameplay";
     if (At<uint8_t>(g, re4::G_plType) != 0) return "not playing as Leon";
@@ -2162,6 +2182,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
         return;
     auto* c = (Control*)g_shared;
     g_guest = c->guest;
+    g_lastExchange = GetTickCount();
     g_guestMovement = c->guestMovement;
     g_guestCamera = *(GuestCamera*)(g_shared + CameraOffset);
     auto* feature = (Features*)(g_shared + FeaturesOffset);
