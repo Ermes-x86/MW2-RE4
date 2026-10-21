@@ -54,7 +54,6 @@ RE4 UHD (x86) + MW2RE4.asi              IW4L runtime (x64)
 - RE4 takes over by itself for doors, ladders, jumps, kicks, quick-time events,
   grabs, cutscenes, the merchant, the typewriter and the attache case (E is
   RE4's action button), and MW2 comes back right after.
-- A UAV (U) shows the Ganados around you on a radar for 30 seconds.
 
 > **Beta.** Expect bugs. Not every story section is supported yet (see
 > [Known limitations](#known-limitations)).
@@ -115,7 +114,6 @@ prepares MW2 assets and takes about a minute.
 | G / H | Hand grenade (frag) / flash grenade, from the case |
 | V | Melee |
 | E | RE4's action button: doors, items, ladders, jumps, the merchant |
-| U | UAV radar (shows the Ganados around you) |
 | RE4 keys | Attache case, map, menus and Ashley's commands work as in RE4 |
 | F5 | Show or hide the RE4 -> MW2 gun list in the case and at the merchant |
 | F7 | Show or hide the controls panel |
