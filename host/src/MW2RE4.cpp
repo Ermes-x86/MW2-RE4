@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v25 (RE4 screens get their keys and text back, gun list on F5)";
+constexpr const char* kVersion = "MW2RE4 v26 (no Leon flash on pickups)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -702,13 +702,15 @@ const char* ActionBlocker(uint8_t* pl)
         g_actionSeenChange = true;
         Log("RE4 action: Leon routine %u/%u/%u -> %u/%u/%u", g_actionRno[0], g_actionRno[1], g_actionRno[2], r[0], r[1], r[2]);
     }
-    // no action started (a pickup or nothing): give control back quickly
-    if (!g_actionSeenChange && age > 500)
+    // Until RE4 actually starts an action, MW2 keeps Leon: a pickup or a press of E that did nothing never
+    // shows Leon for a moment. Once his routine changes (jump, climb, kick...), MW2 steps aside.
+    if (!g_actionSeenChange)
     {
-        g_actionStart = 0;
+        if (age > 500)
+            g_actionStart = 0;
         return nullptr;
     }
-    if (age < 300 || !normal)
+    if (!normal)
     {
         if (age < 10000)
             return "RE4 action (jump, climb...)";
@@ -2387,6 +2389,7 @@ void Status(uint8_t* g, uint8_t* pl, const char* blocker)
 using PadReadFn = void(__cdecl*)();
 PadReadFn g_padReadOrig = nullptr;
 bool g_useWasDown = false;
+DWORD g_lastUse = 0; // when E was last pressed in MW2 mode
 void __cdecl PadReadHook()
 {
     g_padReadOrig();
@@ -2398,15 +2401,16 @@ void __cdecl PadReadHook()
     static int padsWithoutCamera = 0;
     padsWithoutCamera = g_frame != padFrame ? 0 : padsWithoutCamera + 1;
     padFrame = g_frame;
-    const char* screen = Re4ScreenBlocker();
-    if (!screen && padsWithoutCamera >= 4 && GetTickCount() - g_lastTick > 200)
-        screen = "RE4 paused (menu or screen)";
-    if (screen)
+    if (const char* screen = Re4ScreenBlocker())
     {
         Log("MW2 suspended: %s", screen);
         Restore();
         return;
     }
+    // Paused with no screen of its own (an item pickup freezes RE4 for about half a second, the pause menu):
+    // MW2 keeps Leon, hidden, and carries on when RE4 does; meanwhile RE4 gets all its keys.
+    if (padsWithoutCamera >= 4 && GetTickCount() - g_lastTick > 200)
+        return;
     // RE4's mouse deltas share their address with Joy[0]'s left stick: read them before zeroing it.
     if (g_mouseX && g_mouseY)
     {
@@ -2423,6 +2427,7 @@ void __cdecl PadReadHook()
         if (!g_useWasDown)
         {
             *g_keyTrg |= re4::KEY_USE;
+            g_lastUse = GetTickCount();
             uint8_t* pl = Player();
             if (pl && g_actBtnActive && *g_actBtnActive && !g_actionStart)
             {
@@ -2760,7 +2765,12 @@ void DrawOverlay(IDirect3DDevice9* device)
         if (lock.acquired)
             ((Control*)g_shared)->host.enabled = 0; // MW2 ignores input while RE4 is paused
     }
-    bool drawMw2 = g_active && ticking;
+    // The freeze of an item pickup (E pressed just before RE4 stopped, no RE4 screen open): MW2's gun stays
+    // on screen, so picking something up does not blink. Longer pauses (the pause menu) still hide it.
+    DWORD now = GetTickCount();
+    bool pickup = !ticking && g_active && now - g_lastTick < 1500 && g_lastTick - g_lastUse < 1000 &&
+                  !Re4ScreenBlocker();
+    bool drawMw2 = g_active && (ticking || pickup);
     uint8_t* gl = Global();
     // F5 shows or hides the gun list (checked here: the case and the merchant stop RE4's camera hook)
     static bool f5WasDown = false;

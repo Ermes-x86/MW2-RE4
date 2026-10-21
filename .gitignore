@@ -19,3 +19,5 @@ account.dat
 *.lnk
 /iw4l-source/
 /runtime-build/
+/dist/
+/install-test/

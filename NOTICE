@@ -1,0 +1,77 @@
+MW2-RE4 (Beta)
+
+Copyright 2026 Ermes_x86 (Payne)
+
+MW2-RE4 runs Call of Duty: Modern Warfare 2 (2009) gameplay inside
+Resident Evil 4 (2005) Ultimate HD Edition. It is licensed under the Apache
+License, Version 2.0; see LICENSE.
+
+--------------------------------------------------------------------------------
+IW4L (modified)
+--------------------------------------------------------------------------------
+
+The MW2 runtime (iw4l-re4.exe) is built from a modified copy of IW4L.
+
+  IW4L - Copyright 2026 vladtrc
+  https://github.com/vladtrc/iw4L
+  Licensed under the Apache License, Version 2.0.
+
+Base revision: 4d65a39376e14390abe21bd9ad24a28c2687e90f
+
+Ermes_x86 (Payne) modified IW4L to run as a gameplay runtime for the
+MW2-GTA bridge, and further for this RE4 plugin. The changes are active only
+when the IW4L_GTA_BRIDGE environment variable is set (the RE4 changes only
+when IW4L_RE4_BRIDGE is also set); standalone IW4L behaviour is preserved.
+The RE4 changes (runtime-patches/re4-bridge.patch) cover: the MW2 player
+never dying, guns and ammo set from the host's inventory, the host's clip
+sizes, grenades from the host only, and a slimmer player against host
+walls.
+
+IW4L's own NOTICE, LICENSE and THIRD-PARTY-LICENSES.txt are included in
+the release under licenses\ and apply to the runtime built from it.
+
+--------------------------------------------------------------------------------
+Ultimate ASI Loader
+--------------------------------------------------------------------------------
+
+The release includes dinput8.dll from Ultimate ASI Loader v9.7.4 by
+ThirteenAG, https://github.com/ThirteenAG/Ultimate-ASI-Loader, under the
+MIT License:
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the
+  "Software"), to deal in the Software without restriction, including
+  without limitation the rights to use, copy, modify, merge, publish,
+  distribute, sublicense, and/or sell copies of the Software, and to permit
+  persons to whom the Software is furnished to do so, subject to the
+  following conditions:
+
+  The above copyright notice and this permission notice shall be included
+  in all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+  NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+  USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+Other projects
+--------------------------------------------------------------------------------
+
+re4_tweaks - https://github.com/nipkownix/re4_tweaks
+  Its research was the reference for RE4's memory layouts, functions and
+  code patterns. It is not included in this repository or the release.
+
+--------------------------------------------------------------------------------
+Game content
+--------------------------------------------------------------------------------
+
+No Call of Duty or Resident Evil game data is contained in this repository
+or in any MW2-RE4 release. MW2-RE4 reads game data from copies of the games
+the user already owns. Call of Duty, Modern Warfare, Resident Evil, related
+trademarks and all original game assets belong to their respective owners.
+MW2-RE4 is not affiliated with, endorsed by or supported by Activision,
+Infinity Ward or Capcom.

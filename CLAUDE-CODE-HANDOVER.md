@@ -191,3 +191,27 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   while one is set. MW2 comes back through the normal Activate (seamless resume when Leon has not moved).
 - Gun list: hidden by default, and F5 toggles it (INI `ShowGunList`). The key is read in `DrawOverlay`, which
   keeps running while the case is open.
+
+## v26 (2026-10-21): no Leon flash on pickups
+
+- Bug: pressing E always suspended MW2 for at least 300 ms (ActionBlocker), and an item pickup also freezes RE4 for
+  about 0.5 s (no camera frames, no RE4 screen flags). Leon was shown for that time.
+- Fix: ActionBlocker suspends only once Leon's routine actually changes (jump, climb, kick). A freeze with no RE4
+  screen flags no longer suspends: `PadReadHook` just stops filtering RE4's keys while it lasts. `DrawOverlay`
+  keeps MW2's image on screen for up to 1.5 s when E was pressed within 1 s before the freeze (`g_lastUse`).
+  Flagged screens (merchant, case, calls, game over) still hand everything back as in v25.
+
+## Release installer (2026-10-21), modelled on MW2-GTA's
+
+- `installer\`: Install-/Uninstall-MW2RE4.bat + .ps1, default `MW2RE4.ini` (RuntimeDir set by the installer) and
+  `re4-bridge-settings.cfg`. `scripts\Build-Release.ps1 -Version x` builds `dist\MW2-RE4-x.zip` (gitignored) from
+  host\build\MW2RE4.asi, runtime-build\debug\iw4l.exe, UAL dinput8.dll (third_party) and IW4L's licence files.
+- Installer: finds RE4 (Steam libraries, or `-Re4Dir`, root or Bin32) and MW2 (`-Mw2Dir`); warns if bio4.exe is not
+  9,139,840 bytes; installs the bundled UAL only when Bin32 has no dinput8.dll; plugin + INI into Bin32, runtime into
+  `<RE4>\MW2RE4` (LOCALAPPDATA when under Program Files) with `Modern Warfare 2.lnk`; keeps the user's INI values;
+  backups in `<RE4>\MW2RE4-backup\<date>`; manifest `Bin32\MW2RE4.install.json` (tracks the UAL hash across updates).
+  `-Yes` unattended, `-DetectOnly` shows the folders it would use. A wrong folder given on purpose is an error.
+- Tested 2026-10-21 on a test copy of the RE4 folder (never the real one): wrong folders, detect-only, fresh install,
+  update, uninstall; the installed runtime loaded MW2 through the shortcut and reported ready in 73 s.
+- The runtime contains `C:\Users\<name>\.cargo` paths (Rust panic locations), as MW2-GTA's release does, so the
+  package is built with `-KeepLocalPaths`. Removing them needs a runtime rebuild with `--remap-path-prefix`.
