@@ -230,3 +230,13 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   (`PadReadHook` returns early), `host.enabled = 0`. MW2 keeps Leon (hidden), so there is no hand-over flash.
   The v26 "keep MW2's image through a pickup freeze" exception is removed. The log shows
   "RE4 item pickup screen open/closed (N ms after E)".
+
+## v28 (2026-10-21): pickup screen text at the bottom
+
+- v27's STA_ITEM_GET was never seen set at the "take it?" screen (no "item pickup screen open" log), so its text
+  was still raised; the hand only vanished because RE4 stops for that screen (no camera frames).
+- `PickupScreen()`: RE4 stopped (Flags_STOP word 0 has SPF_CAMERA/SPF_PL/SPF_EM, or STA_ITEM_GET, or no camera frame
+  for 100 ms) and the stop began within 1.5 s of E. While true: captions are not raised, `RestorePrompts()` puts the
+  window back (called from MesSetHook, PadReadHook and the camera hook), all keys go to RE4, host.enabled = 0.
+  Other captions keep the raise. Logs: "pickup screen: RE4 stopped N ms after E (stop flags ..., status ...)",
+  "pickup caption ... kept at (x, y)", "pickup screen closed".

@@ -52,6 +52,8 @@ namespace re4
     constexpr uint32_t DPF_PL         = 0x40000000; // set = player model hidden (seen 0 normally)
     constexpr uint32_t DPF_COCKPIT    = 0x00010000; // set = RE4 HUD hidden
     constexpr uint32_t SPF_PL         = 0x10000000; // stop player logic (used by re4_tweaks' free camera)
+    constexpr uint32_t SPF_CAMERA     = 0x40000000; // stop camera logic
+    constexpr uint32_t SPF_EM         = 0x20000000; // stop enemy logic
     constexpr uint32_t STA_MOVIE_ON   = 0x10000000;
     constexpr uint32_t STA_MOVIE2_ON  = 0x04000000;
     constexpr uint32_t STA_DIEDEMO    = 0x00100000;

@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v27 (pickup screen: MW2 hand off, RE4 text in place)";
+constexpr const char* kVersion = "MW2RE4 v28 (pickup screen text at the bottom)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -744,6 +744,32 @@ bool ItemGetOpen()
     return g && (At<uint32_t>(g, re4::G_statusFlags1) & re4::STA1_ITEM_GET);
 }
 
+// A pickup screen ("take it?"): RE4 stops (camera, player or enemy logic) within a moment of E. Its text and
+// window must stay where RE4 puts them (bottom of the screen); MW2's hand is hidden anyway while RE4 stops.
+// Only a stop that follows E counts, so every other caption keeps its place.
+extern DWORD g_lastUse;
+bool PickupScreen()
+{
+    uint8_t* g = Global();
+    if (!g || !g_active)
+        return false;
+    DWORD now = GetTickCount();
+    bool stopped = (At<uint32_t>(g, re4::G_stopFlags) & (re4::SPF_CAMERA | re4::SPF_PL | re4::SPF_EM)) || ItemGetOpen() ||
+                   now - g_lastTick > 100;
+    static bool was = false, fromUse = false;
+    if (stopped && !was)
+    {
+        fromUse = now - g_lastUse < 1500;
+        if (fromUse)
+            Log("pickup screen: RE4 stopped %lu ms after E (stop flags 0x%08X, status 0x%08X 0x%08X)", now - g_lastUse,
+                At<uint32_t>(g, re4::G_stopFlags), At<uint32_t>(g, re4::G_statusFlags), At<uint32_t>(g, re4::G_statusFlags1));
+    }
+    else if (!stopped && was && fromUse)
+        Log("pickup screen closed");
+    was = stopped;
+    return stopped && fromUse;
+}
+
 const char* Blocker(uint8_t* g, uint8_t* pl)
 {
     if (!g_requested) return "off";
@@ -1095,7 +1121,15 @@ MesSetFn g_mesSetOrig = nullptr;
 bool __fastcall MesSetHook(void* self, void* edx, uint32_t num, int px, int py, uint32_t attr, int wk, uint8_t col,
                            int font)
 {
-    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f && !Re4ScreenBlocker() && !ItemGetOpen())
+    bool pickup = PickupScreen();
+    if (pickup)
+    {
+        RestorePrompts(); // the pickup screen's window back in place too
+        static int logged = 0;
+        if (logged < 10 && ++logged)
+            Log("pickup caption %u (layout %d, slot %d) kept at (%d, %d)", num, font, wk, px, py);
+    }
+    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f && !Re4ScreenBlocker() && !pickup)
     {
         static int logged = 0;
         if (logged < 20 && ++logged)
@@ -2267,7 +2301,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
 
     DWORD now = GetTickCount();
     g_host.tick = now;
-    g_host.enabled = g_active && !MenuOpen() && !ItemGetOpen() ? 1 : 0;
+    g_host.enabled = g_active && !MenuOpen() && !ItemGetOpen() && !PickupScreen() ? 1 : 0;
     g_host.yaw = g_yaw;
     g_host.pitch = g_pitch;
     g_host.fov = g_cfg.fov;
@@ -2416,8 +2450,11 @@ void __cdecl PadReadHook()
         Restore();
         return;
     }
-    if (ItemGetOpen())
-        return;
+    if (PickupScreen())
+    {
+        RestorePrompts();
+        return; // every key to RE4: accept or leave the item
+    }
     // Paused with no screen of its own (an item pickup freezes RE4 for about half a second, the pause menu):
     // MW2 keeps Leon, hidden, and carries on when RE4 does; meanwhile RE4 gets all its keys.
     if (padsWithoutCamera >= 4 && GetTickCount() - g_lastTick > 200)
@@ -2529,7 +2566,7 @@ void __cdecl CameraSetHook(uint8_t* camera)
     if (itemGet != itemGetWas)
         Log("RE4 item pickup screen %s (%lu ms after E)", itemGet ? "open" : "closed", GetTickCount() - g_lastUse);
     itemGetWas = itemGet;
-    if (g_active && itemGet)
+    if (g_active && (itemGet || PickupScreen()))
         RestorePrompts();
     else if (g_active)
         RaisePrompts();
