@@ -208,7 +208,7 @@ host\Build-ASI.cmd                       # -> host\build\MW2RE4.asi
 # runtime: MW2-GTA's IW4L source with runtime-patches\re4-bridge.patch applied
 $env:CARGO_PROFILE_DEV_DEBUG = '0'; $env:CARGO_PROFILE_DEV_OPT_LEVEL = '1'
 cargo build -p launcher                  # -> <target>\debug\iw4l.exe (shipped as iw4l-re4.exe)
-scripts\Build-Release.ps1 -Version 0.1.1-beta
+scripts\Build-Release.ps1 -Version 0.1.2-beta
 ```
 
 The native and runtime halves share a memory layout (`host/src/Protocol.h` and
