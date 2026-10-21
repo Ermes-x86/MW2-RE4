@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v24 (no class grenades/knives, smooth hand-backs, slimmer MW2 body)";
+constexpr const char* kVersion = "MW2RE4 v25 (RE4 screens get their keys and text back, gun list on F5)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -71,6 +71,7 @@ struct Settings
     int hidePlayer = 1;
     int invertMouseY = 0;
     int showControls = 1;
+    int showGunList = 0;       // F5: RE4 -> MW2 gun list in the attache case and the merchant
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
@@ -125,6 +126,7 @@ void LoadSettings()
     g_cfg.hidePlayer = GetPrivateProfileIntA("MW2RE4", "HideLeon", g_cfg.hidePlayer, path);
     g_cfg.invertMouseY = GetPrivateProfileIntA("MW2RE4", "InvertMouseY", g_cfg.invertMouseY, path);
     g_cfg.showControls = GetPrivateProfileIntA("MW2RE4", "ShowControls", g_cfg.showControls, path);
+    g_cfg.showGunList = GetPrivateProfileIntA("MW2RE4", "ShowGunList", g_cfg.showGunList, path);
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
     g_cfg.promptRaise = IniFloat(path, "PromptRaise", g_cfg.promptRaise);
     g_cfg.messageRaise = IniFloat(path, "MessageRaise", g_cfg.messageRaise);
@@ -718,6 +720,19 @@ const char* ActionBlocker(uint8_t* pl)
     return nullptr;
 }
 
+// RE4 screens that stop gameplay (merchant, attache case, Hunnigan's calls, game over, pause): RE4's camera
+// stops with them, so CameraSetHook cannot see them open. The pad read and the text keep running, so they
+// check this and hand everything back to RE4 at once.
+const char* Re4ScreenBlocker()
+{
+    uint8_t* g = Global();
+    if (!g) return "no game";
+    if (At<uint8_t>(g, re4::G_rno0) != 3) return "not in gameplay";
+    if (At<int16_t>(g, re4::G_plHp) <= 0) return "Leon is down";
+    if (At<uint32_t>(g, re4::G_statusFlags) & re4::STA_SUSPEND) return "RE4 screen (merchant, case, call, menu)";
+    return nullptr;
+}
+
 const char* Blocker(uint8_t* g, uint8_t* pl)
 {
     if (!g_requested) return "off";
@@ -1069,7 +1084,7 @@ MesSetFn g_mesSetOrig = nullptr;
 bool __fastcall MesSetHook(void* self, void* edx, uint32_t num, int px, int py, uint32_t attr, int wk, uint8_t col,
                            int font)
 {
-    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f)
+    if (g_active && (font == 0 || font == 5) && g_cfg.messageRaise != 0.f && !Re4ScreenBlocker())
     {
         static int logged = 0;
         if (logged < 20 && ++logged)
@@ -2377,6 +2392,21 @@ void __cdecl PadReadHook()
     g_padReadOrig();
     if (!g_active || !g_keyOn || !g_keyTrg)
         return;
+    // A merchant, the case, a call or the game-over screen opened: RE4's camera stopped, so only here can
+    // it be seen. RE4 gets its keys, mouse and text back now (MW2 resumes when gameplay does).
+    static LONG padFrame = 0;
+    static int padsWithoutCamera = 0;
+    padsWithoutCamera = g_frame != padFrame ? 0 : padsWithoutCamera + 1;
+    padFrame = g_frame;
+    const char* screen = Re4ScreenBlocker();
+    if (!screen && padsWithoutCamera >= 4 && GetTickCount() - g_lastTick > 200)
+        screen = "RE4 paused (menu or screen)";
+    if (screen)
+    {
+        Log("MW2 suspended: %s", screen);
+        Restore();
+        return;
+    }
     // RE4's mouse deltas share their address with Joy[0]'s left stick: read them before zeroing it.
     if (g_mouseX && g_mouseY)
     {
@@ -2684,6 +2714,7 @@ const char* kHelp =
     "G  grenade        H  tactical\n"
     "V  melee          E  use: doors, items\n"
     "Guns and ammo: Leon's attache case\n"
+    "F5  gun list in the case (on / off)\n"
     "F10  settings: FOV, mouse, ammo, skin\n"
     "F11  gun damage\n"
     "U  UAV radar (shows Ganados)\n"
@@ -2731,7 +2762,20 @@ void DrawOverlay(IDirect3DDevice9* device)
     }
     bool drawMw2 = g_active && ticking;
     uint8_t* gl = Global();
-    bool gunList = g_requested && ArsenalReady() && gl && (At<uint32_t>(gl, re4::G_statusFlags) & re4::STA_SUB_SCRN);
+    // F5 shows or hides the gun list (checked here: the case and the merchant stop RE4's camera hook)
+    static bool f5WasDown = false;
+    bool f5 = Focused() && Down(VK_F5);
+    if (f5 && !f5WasDown && g_requested && ArsenalReady())
+    {
+        g_cfg.showGunList = !g_cfg.showGunList;
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+        WritePrivateProfileStringA("MW2RE4", "ShowGunList", g_cfg.showGunList ? "1" : "0", path);
+        Log("F5: gun list %s", g_cfg.showGunList ? "on" : "off");
+    }
+    f5WasDown = f5;
+    bool gunList = g_cfg.showGunList && g_requested && ArsenalReady() && gl &&
+                   (At<uint32_t>(gl, re4::G_statusFlags) & re4::STA_SUB_SCRN);
     if (!drawMw2 && !indicator && !gunList)
         return;
     CreateChromaShader(device);

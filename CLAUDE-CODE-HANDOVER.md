@@ -179,3 +179,15 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 - False "MW2 loading": after RE4 pauses (case, map, menus) the hook stops, so the guest copy looked >1.5 s old and MW2 restarted (new epoch, pitch reset). Blocker now measures guest age at the last Exchange (g_lastExchange - guest.tick).
 - Activate resumes without a new epoch (same view) when Leon is within 10 cm / 15 deg of MW2 and the break was < 10 s.
 - Doors: IW4 hull is +-15 in (0.76 m); against RE4 geometry the runtime scales x/y by 0.78 (0.6 m, Leon-like) in HostCollision trace/penetrations and the trap/unblock helpers (host_hull_scale, RE4 mode only).
+
+## v25 (2026-10-21): RE4 screens get their keys and text back, gun list on F5
+
+- Bug: the merchant, the attache case, Hunnigan's calls and the game-over screen stop RE4's camera, so
+  `CameraSetHook` never saw them open and MW2 stayed in control (log: last status "MW2 ACTIVE", then silence
+  until the menu closed). `PadReadHook` kept filtering RE4's keys (no arrows, rotate, Enter, mouse) and
+  `MesSetHook` kept raising captions, which pushed the merchant's description up and hid the item names.
+- Fix: `Re4ScreenBlocker()` (G_rno0 != 3, Leon's HP <= 0, STA_SUSPEND) checked in `PadReadHook`, plus "no camera
+  frame for 4 pad reads and 200 ms". Either one calls `Restore()` right there. `MesSetHook` also skips the raise
+  while one is set. MW2 comes back through the normal Activate (seamless resume when Leon has not moved).
+- Gun list: hidden by default, and F5 toggles it (INI `ShowGunList`). The key is read in `DrawOverlay`, which
+  keeps running while the case is open.
