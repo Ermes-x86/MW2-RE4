@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v32 (crash report)";
+constexpr const char* kVersion = "MW2RE4 v32 (crash report, chained)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -131,8 +131,12 @@ LONG WINAPI CrashVectored(EXCEPTION_POINTERS* info)
 }
 
 using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = nullptr; // RE4's (or Steam's) filter: still runs after ours
 LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
 {
+    static volatile LONG inside = 0;
+    if (InterlockedExchange(&inside, 1)) // a chained filter that calls back into us
+        return EXCEPTION_CONTINUE_SEARCH;
     LogException(info, "RE4 CRASHED");
     char path[MAX_PATH];
     snprintf(path, sizeof(path), "%sMW2RE4-crash.dmp", g_dir);
@@ -149,7 +153,7 @@ LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
                 Log(ok ? "crash dump written: %s" : "crash dump failed: %s", path);
             }
         }
-    return EXCEPTION_CONTINUE_SEARCH;
+    return g_previousFilter ? g_previousFilter(info) : EXCEPTION_CONTINUE_SEARCH;
 }
 
 // Something else (the CRT, Steam) may install its own filter later; put ours back on top.
@@ -163,7 +167,10 @@ void InstallCrashFilter()
         AddVectoredExceptionHandler(0, CrashVectored);
     }
     if (previous && previous != CrashFilter)
-        Log("crash report: replaced another crash filter (%p)", (void*)previous);
+    {
+        g_previousFilter = previous;
+        Log("crash report: on top of another crash filter (%p), which still runs after it", (void*)previous);
+    }
 }
 
 // ---------------------------------------------------------------- settings

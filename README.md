@@ -171,13 +171,17 @@ Which MW2 gun each RE4 gun becomes can be changed in the `[Guns]` section of
   runtime log is `<runtime folder>\iw4l-artifacts\logs\latest.log`; check that
   the `Modern Warfare 2.lnk` shortcut in the runtime folder points to your MW2
   folder (running the installer again fixes it).
+- **MW2 is in the way in a special section.** Press F6 to give RE4 full
+  control, and F6 again afterwards.
 
 ## Reporting a bug
 
 [Open an issue](../../issues) and attach:
 
 - `Resident Evil 4\Bin32\MW2RE4.log` (and `MW2RE4.prev.log` if the problem was
-  in the previous session);
+  in the previous session). If RE4 crashed, the crash details are at the end
+  of the log; a `MW2RE4-crash.dmp` file is also saved there, but only send it
+  if asked, because it holds a copy of the game's memory;
 - the newest `.log` files in `<runtime folder>\iw4l-artifacts\logs`;
 - your graphics card, RAM, and whether RE4 runs full screen or windowed.
 
@@ -186,8 +190,6 @@ folder paths, which can include your Windows user name (for example
 `C:\Users\YourName\...`). If you don't want to share it, open the log in
 Notepad and replace it with any word before uploading. **Never attach
 `account.dat`** or any game files.
-- **MW2 is in the way in a special section.** Press F6 to give RE4 full
-  control, and F6 again afterwards.
 
 ## Building from source
 

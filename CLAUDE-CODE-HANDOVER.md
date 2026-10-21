@@ -273,3 +273,15 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   WriteGuestResolution). The RESTART MW2 row now applies a changed skin or resolution (RestartNeeded()).
 - Going above 1280x720 (e.g. 1920x1080) needs a bigger shared image: Protocol.h and the runtime's MAX_WIDTH /
   MAX_HEIGHT in gta_bridge.rs together, so a runtime rebuild.
+
+## v32 (2026-10-21): crash report
+
+- After switching RE4 to full screen 1920x1080, RE4 crashed once while loading a save, before F6 (WER: BEX,
+  c0000005, executing at 0x0F9207E8, no module; the WER dump folder needs admin). It did not happen again on the
+  next try (MW2 ready after 97.5 s, no exceptions). Cause unknown.
+- The plugin now reports crashes itself: a vectored handler logs the first 5 access violations / illegal
+  instructions (even handled ones), and an unhandled-exception filter logs "RE4 CRASHED" with the fault, the
+  registers and up to 16 code addresses from the stack (module+offset), then writes `Bin32\MW2RE4-crash.dmp`
+  (MiniDumpWithIndirectlyReferencedMemory). The filter is installed at load and again at the first Present
+  (bio4.exe sets its own at 0x0040C989, another DLL one later); the filter it replaced still runs after it
+  (g_previousFilter), with a guard against filters calling each other. The uninstaller removes the dump.

@@ -76,7 +76,7 @@ while (-not $manifestPath) {
 $bin = Split-Path -Parent $manifestPath
 $manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
 
-foreach ($file in 'MW2RE4.asi', 'MW2RE4.pdb', 'MW2RE4.log', 'MW2RE4.prev.log') {
+foreach ($file in 'MW2RE4.asi', 'MW2RE4.pdb', 'MW2RE4.log', 'MW2RE4.prev.log', 'MW2RE4-crash.dmp') {
     $path = Join-Path $bin $file
     if (Test-Path $path) { Remove-Item $path -Force; Say "Removed $file" }
 }
