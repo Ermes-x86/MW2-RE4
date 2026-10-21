@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v31 (MW2 resolution in F10)";
+constexpr const char* kVersion = "MW2RE4 v32 (crash report)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -54,6 +54,116 @@ void OpenLog()
     snprintf(prev, sizeof(prev), "%sMW2RE4.prev.log", g_dir);
     MoveFileExA(path, prev, MOVEFILE_REPLACE_EXISTING);
     g_log = _fsopen(path, "w", _SH_DENYWR);
+}
+
+// ---------------------------------------------------------------- crash report
+// When RE4 crashes, MW2RE4.log gets the fault, the registers and the code addresses found on the stack (module
+// + offset), and MW2RE4-crash.dmp a small minidump. The first access violations are logged even when something
+// handles them, since a crash may start as one.
+const char* ModuleOf(uintptr_t address, uintptr_t* offset)
+{
+    static char name[MAX_PATH];
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)address, &module) || !module || !GetModuleFileNameA(module, name, MAX_PATH))
+        return nullptr;
+    *offset = address - (uintptr_t)module;
+    const char* slash = strrchr(name, '\\');
+    return slash ? slash + 1 : name;
+}
+
+bool IsCode(uintptr_t address)
+{
+    MEMORY_BASIC_INFORMATION info{};
+    if (!VirtualQuery((void*)address, &info, sizeof(info)) || info.State != MEM_COMMIT)
+        return false;
+    return (info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+void LogAddress(const char* what, uintptr_t address)
+{
+    uintptr_t offset = 0;
+    const char* module = ModuleOf(address, &offset);
+    if (module)
+        Log("  %s %08X = %s+0x%X", what, (unsigned)address, module, (unsigned)offset);
+    else
+        Log("  %s %08X (no module%s)", what, (unsigned)address, IsCode(address) ? ", executable memory" : "");
+}
+
+void LogException(EXCEPTION_POINTERS* info, const char* kind)
+{
+    EXCEPTION_RECORD* r = info->ExceptionRecord;
+    CONTEXT* c = info->ContextRecord;
+    Log("%s: exception 0x%08lX at %08X, thread %lu", kind, r->ExceptionCode, (unsigned)(uintptr_t)r->ExceptionAddress,
+        GetCurrentThreadId());
+    LogAddress("fault", (uintptr_t)r->ExceptionAddress);
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2)
+        Log("  %s address %08X", r->ExceptionInformation[0] == 8 ? "executing" : r->ExceptionInformation[0] ? "writing" : "reading",
+            (unsigned)r->ExceptionInformation[1]);
+    Log("  eax %08lX ebx %08lX ecx %08lX edx %08lX esi %08lX edi %08lX ebp %08lX esp %08lX", c->Eax, c->Ebx, c->Ecx,
+        c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
+    // return addresses: stack words that point into code
+    int found = 0;
+    __try
+    {
+        for (uintptr_t* sp = (uintptr_t*)c->Esp; found < 16 && sp < (uintptr_t*)c->Esp + 2048; ++sp)
+            if (*sp > 0x10000 && IsCode(*sp))
+            {
+                char what[32];
+                snprintf(what, sizeof(what), "stack+%03X", (unsigned)((uint8_t*)sp - (uint8_t*)c->Esp));
+                LogAddress(what, *sp);
+                ++found;
+            }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+LONG WINAPI CrashVectored(EXCEPTION_POINTERS* info)
+{
+    static volatile LONG logged = 0;
+    DWORD code = info->ExceptionRecord->ExceptionCode;
+    if ((code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION ||
+         code == EXCEPTION_PRIV_INSTRUCTION) && InterlockedIncrement(&logged) <= 5)
+        LogException(info, "first-chance");
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info)
+{
+    LogException(info, "RE4 CRASHED");
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4-crash.dmp", g_dir);
+    if (HMODULE dbghelp = LoadLibraryA("dbghelp.dll"))
+        if (auto write = (MiniDumpWriteDumpFn)GetProcAddress(dbghelp, "MiniDumpWriteDump"))
+        {
+            HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE)
+            {
+                struct { DWORD thread; EXCEPTION_POINTERS* pointers; BOOL client; } exception = { GetCurrentThreadId(), info, FALSE };
+                // MiniDumpWithIndirectlyReferencedMemory: small, but holds the memory the registers point at
+                BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), file, 0x40, &exception, nullptr, nullptr);
+                CloseHandle(file);
+                Log(ok ? "crash dump written: %s" : "crash dump failed: %s", path);
+            }
+        }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// Something else (the CRT, Steam) may install its own filter later; put ours back on top.
+void InstallCrashFilter()
+{
+    LPTOP_LEVEL_EXCEPTION_FILTER previous = SetUnhandledExceptionFilter(CrashFilter);
+    static bool vectored = false;
+    if (!vectored)
+    {
+        vectored = true;
+        AddVectoredExceptionHandler(0, CrashVectored);
+    }
+    if (previous && previous != CrashFilter)
+        Log("crash report: replaced another crash filter (%p)", (void*)previous);
 }
 
 // ---------------------------------------------------------------- settings
@@ -3153,6 +3263,7 @@ void BeforePresent(IDirect3DDevice9* device, const char* via)
     {
         g_loggedPresent = true;
         Log("first frame presented via %s; overlay hook working", via);
+        InstallCrashFilter();
     }
     SafeDrawOverlay(device);
     if (g_shared)
@@ -3397,6 +3508,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
         WIN32_FILE_ATTRIBUTE_DATA fa{};
         GetFileAttributesExA(exe, GetFileExInfoStandard, &fa);
         Log("%s loaded into %s (%lu bytes)", kVersion, exe, fa.nFileSizeLow);
+        InstallCrashFilter();
         LoadSettings();
         g_ready = Init(); // patch the game before it runs, as in phase 1
         CreateThread(nullptr, 0, g_ready ? StartBridge : Startup, nullptr, 0, nullptr);
