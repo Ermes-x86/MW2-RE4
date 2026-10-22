@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
+#include <intrin.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -190,6 +191,7 @@ struct Settings
     int showControls = 1;
     int showGunList = 0;       // F5: RE4 -> MW2 gun list in the attache case and the merchant
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
+    int grenadeTrace = 0; // research: log RE4's own effect / sound / blast calls while MW2 is off
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
     // Damage multiplier per MW2 gun class (F11), applied to the damage RE4 computes for the class's RE4 gun
@@ -257,6 +259,7 @@ void LoadSettings()
     g_cfg.showControls = GetPrivateProfileIntA("MW2RE4", "ShowControls", g_cfg.showControls, path);
     g_cfg.showGunList = GetPrivateProfileIntA("MW2RE4", "ShowGunList", g_cfg.showGunList, path);
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
+    g_cfg.grenadeTrace = GetPrivateProfileIntA("MW2RE4", "GrenadeTrace", g_cfg.grenadeTrace, path);
     g_cfg.promptRaise = IniFloat(path, "PromptRaise", g_cfg.promptRaise);
     g_cfg.messageRaise = IniFloat(path, "MessageRaise", g_cfg.messageRaise);
     g_cfg.uavSeconds = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavSeconds", g_cfg.uavSeconds, path), 5, 600);
@@ -2446,6 +2449,69 @@ DWORD WINAPI TraceArmer(void*)
     }
 }
 
+// GrenadeTrace=1 (research): RE4's own effect, sound and blast-hit calls are logged with their arguments and the
+// calling address while MW2 is off, to copy what RE4 does (e.g. its incendiary grenade). Repeats are dropped.
+using TraceFn = int(__cdecl*)(int, int, int, int, int, int, int, int, int, int, int, int);
+TraceFn g_traceEffectOrig = nullptr, g_traceSoundOrig = nullptr, g_traceHitOrig = nullptr;
+
+void TraceCall(const char* what, void* from, const int* a)
+{
+    static int lines = 0;
+    static std::vector<std::pair<void*, int>> seen;
+    if (g_active || lines >= 600)
+        return;
+    int key = a[0] * 31 + a[1] * 17 + a[4] * 7 + a[5] * 3 + a[3];
+    int repeats = 0;
+    for (auto& e : seen)
+        if (e.first == from && e.second == key)
+            ++repeats;
+    if (repeats >= 2)
+        return;
+    seen.emplace_back(from, key);
+    ++lines;
+    float f5;
+    memcpy(&f5, &a[5], 4);
+    Log("TRACE %s from bio4+0x%X: %d %d 0x%X %d %d %d %d %d %d %d (arg5 as float %.1f)", what,
+        (unsigned)((uint8_t*)from - (uint8_t*)GetModuleHandleA(nullptr) + 0x400000), a[0], a[1], a[2], a[3], a[4], a[5],
+        a[6], a[7], a[8], a[9], f5);
+}
+
+int __cdecl TraceEffect(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11)
+{
+    int a[10] = { a0, a1, a2, a3, a4, a5, a6, a7, a8, a9 };
+    TraceCall("effect", _ReturnAddress(), a);
+    return g_traceEffectOrig(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+}
+
+int __cdecl TraceSound(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11)
+{
+    int a[10] = { a0, a1, a2, a3, a4, a5, a6, a7, a8, a9 };
+    TraceCall("sound", _ReturnAddress(), a);
+    return g_traceSoundOrig(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+}
+
+int __cdecl TraceHit(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11)
+{
+    int a[10] = { a0, a1, a2, a3, a4, a5, a6, a7, a8, a9 };
+    TraceCall("blast/bullet hit", _ReturnAddress(), a);
+    return g_traceHitOrig(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+}
+
+void InstallGrenadeTrace(uint8_t* base)
+{
+    // the JMP thunks every caller uses (bio4.exe 1.1.0 UHD; HookThunk checks the E9)
+    struct { uint32_t va; void* hook; TraceFn* orig; const char* name; } hooks[] = {
+        { 0x4014C4, (void*)&TraceEffect, &g_traceEffectOrig, "effect" },
+        { 0x40ADC1, (void*)&TraceSound, &g_traceSoundOrig, "sound" },
+        { 0x407865, (void*)&TraceHit, &g_traceHitOrig, "blast/bullet hit" },
+    };
+    for (auto& h : hooks)
+    {
+        bool ok = HookThunk(base + (h.va - 0x400000), h.hook, (void**)h.orig);
+        Log("grenade trace: %s hook %s", h.name, ok ? "on" : "FAILED");
+    }
+}
+
 void UpdateTrace(uint8_t* pl)
 {
     static DWORD last = 0;
@@ -3470,6 +3536,8 @@ bool Init()
     }
     if (uint8_t* q = Find(m, re4::kQteActive))
         g_qteActive = *(uint8_t**)q;
+    if (g_cfg.grenadeTrace)
+        InstallGrenadeTrace((uint8_t*)GetModuleHandleA(nullptr));
     if (uint8_t* ld = Find(m, re4::kLifeDown))
     {
         // the JMP thunk all callers use
