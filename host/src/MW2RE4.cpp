@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v34 (Leon-style arms, jacket)";
+constexpr const char* kVersion = "MW2RE4 v35 (footsteps on RE4 floors)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
