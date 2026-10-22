@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v32 (crash report, chained)";
+constexpr const char* kVersion = "MW2RE4 v34 (Leon-style arms)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -209,13 +209,17 @@ constexpr int kResolutionCount = sizeof(kResolutions) / sizeof(kResolutions[0]);
 
 // MW2 picks the player's arms and body from the map's soldier kit, so the skin is chosen by the map MW2
 // loads (only its weapons and soldiers are used; RE4 supplies the world). Takes effect when MW2 starts.
-struct Skin { const char* name; const char* map; };
+// Leon: mp_subbase's two kits stand for Leon's two looks in RE4 (thick arctic arms = leather jacket, slim SEAL
+// wetsuit arms = short sleeves and bare forearms), repainted by the runtime from the player's own MW2 images
+// (IW4L_RE4_LEON_STYLE); which one shows follows RE4 (LeonLook).
+struct Skin { const char* name; const char* map; bool leon; };
 const Skin kSkins[] = {
-    { "Task Force 141 (desert)", "mp_rust" },
-    { "Task Force 141 (urban)", "mp_favela" },
-    { "Task Force 141 (snow)", "mp_derail" },
-    { "US Army Rangers", "mp_invasion" },
-    { "Navy SEALs", "mp_subbase" },
+    { "Task Force 141 (desert)", "mp_rust", false },
+    { "Task Force 141 (urban)", "mp_favela", false },
+    { "Task Force 141 (snow)", "mp_derail", false },
+    { "US Army Rangers", "mp_invasion", false },
+    { "Navy SEALs", "mp_subbase", false },
+    { "Leon (follows RE4)", "mp_subbase", true },
 };
 constexpr int kSkinCount = sizeof(kSkins) / sizeof(kSkins[0]);
 
@@ -424,6 +428,26 @@ uint8_t* Partner()
     return p;
 }
 
+// Leon's look for Leon-style arms: 1 = arms in sleeves (jacket, also the RPD and mafia costumes), 2 = bare
+// forearms (no jacket, vest costume), 0 = not Leon. GLOBAL_WK plCostume follows plType (re4_tweaks SDK).
+uint32_t LeonLook()
+{
+    uint8_t* g = Global();
+    if (!g)
+        return 0;
+    uint8_t type = At<uint8_t>(g, re4::G_plType), costume = At<uint8_t>(g, re4::G_plCostume);
+    static int s_type = -1, s_costume = -1;
+    if (type != s_type || costume != s_costume)
+    {
+        Log("RE4 player type %u costume %u", type, costume);
+        s_type = type;
+        s_costume = costume;
+    }
+    if (type != 0)
+        return 0;
+    return costume == 1 || costume == 2 ? 2 : 1;
+}
+
 // RE4 (mm, Y up) <-> bridge host space (metres, Z up, same axes as GTA/IW4). A proper rotation,
 // so triangle winding and handedness are preserved.
 void ToHost(const Vec3& v, float out[3])
@@ -592,6 +616,9 @@ bool StartRuntime()
     SetEnvironmentVariableW(L"IW4L_PIPELINED_RENDERING", L"0");
     SetEnvironmentVariableW(L"IW4L_SCRIPT_DVARS", L"set scr_dm_timelimit 0; set scr_dm_scorelimit 0; set scr_war_timelimit 0; set scr_war_scorelimit 0");
     SetEnvironmentVariableW(L"IW4L_IMAGE_DECODE_BUDGET_MIB", L"128");
+    SetEnvironmentVariableW(L"IW4L_RE4_LEON_STYLE", kSkins[g_cfg.skin].leon ? L"1" : nullptr);
+    // the player's own paintings of the arms images (<image>.png), used instead of the automatic Leon paint
+    SetEnvironmentVariableW(L"IW4L_RE4_LEON_PAINT", (root + L"\\leon-paint").c_str());
     std::wstring command = L"\"" + exe + L"\" --cmds \"wait progression; unlock all; map " + Wide(kSkins[g_cfg.skin].map) +
                            L"; wait world; spawn 0; force_match_start\" menu";
     g_runtimeSkin = g_cfg.skin;
@@ -2533,6 +2560,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
     memcpy(&g_hostMovement.reserved[0], &g_mouseTotalX, sizeof(float));
     memcpy(&g_hostMovement.reserved[1], &g_mouseTotalY, sizeof(float));
     g_hostMovement.reserved[2] = 0;
+    g_hostMovement.reserved[3] = LeonLook();
     c->host = g_host;
     c->hostMovement = g_hostMovement;
     c->lock = {};

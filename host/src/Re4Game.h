@@ -44,6 +44,7 @@ namespace re4
     constexpr size_t G_plHp        = 0x4FB4; // int16
     constexpr size_t G_plHpMax     = 0x4FB6; // int16
     constexpr size_t G_plType      = 0x4FC8; // uint8, 0 = Leon
+    constexpr size_t G_plCostume   = 0x4FC9; // uint8, Leon: 0 jacket, 1 normal, 2 vest, 3 RPD, 4 mafia
     constexpr size_t G_statusFlags = 0x501C; // Flags_STATUS word 0
     constexpr size_t G_statusFlags1 = 0x5020; // Flags_STATUS word 1
     constexpr uint32_t STA1_ITEM_GET = 0x00000002; // word 1: RE4's item pickup screen is up
