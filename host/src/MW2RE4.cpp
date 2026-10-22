@@ -22,7 +22,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v35 (footsteps on RE4 floors)";
+constexpr const char* kVersion = "MW2RE4 v36 (F8 gun picker)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -486,7 +486,8 @@ bool g_sceneOverflow = false;
 uint32_t g_savedStop = 0, g_savedDisp = 0;
 bool g_keyWasDown = false;
 bool g_helpKeyWasDown = false;
-// Weapon menu (F8): MW2's own catalog, filtered to what fits RE4. F9 refills ammo.
+// Weapon menu (F8): MW2's own catalog, filtered to what fits RE4. F9 refills ammo. With Re4Inventory=1 it picks
+// which MW2 gun stands for the RE4 gun Leon has equipped (saved to [Guns]); ammo stays RE4's.
 Features g_features{};
 std::vector<CatalogEntry> g_catalog;   // filtered, as shown
 std::vector<CatalogEntry> g_catalogAll; // everything MW2 sent, for naming shots
@@ -498,6 +499,11 @@ int g_damageRow = 0;
 int g_settingsRow = 0;
 bool MenuOpen() { return g_weaponMenu || g_settingsMenu || g_damageMenu; }
 size_t g_selected = 0;
+std::vector<size_t> g_pickList; // Re4Inventory=1: the g_catalog guns the F8 picker offers
+bool PickerStart();
+void PickerApply(const char* mw2);
+std::string PickerTitle();
+bool PickerCurrent(const char* mw2);
 uint32_t g_request = 0, g_requestKind = 0, g_requestWeapon = 0;
 int32_t g_requestClip = 0, g_requestStock = 0, g_requestSize = 0;
 DWORD g_requestTime = 0;
@@ -1713,7 +1719,10 @@ void WeaponMenuInput(bool focused)
         g_damageMenu = false;
     if ((f8 || f9) && g_cfg.re4Inventory)
     {
-        Notice("Guns and ammo come from Leon's attache case. 1 = next gun", 4000);
+        if (f9)
+            Notice("Ammo comes from Leon's attache case", 3000);
+        if (f8)
+            g_weaponMenu = !g_weaponMenu && PickerStart();
         f8 = f9 = false;
     }
     if (f8)
@@ -1727,7 +1736,12 @@ void WeaponMenuInput(bool focused)
         Request(2);
     if (g_weaponMenu && !g_catalog.empty())
     {
-        size_t n = g_catalog.size();
+        size_t n = g_cfg.re4Inventory ? g_pickList.size() : g_catalog.size();
+        if (!n)
+        {
+            g_weaponMenu = false;
+            return;
+        }
         if (up) g_selected = (g_selected + n - 1) % n;
         if (down) g_selected = (g_selected + 1) % n;
         if (left) g_selected = g_selected >= 12 ? g_selected - 12 : 0;
@@ -1735,7 +1749,10 @@ void WeaponMenuInput(bool focused)
         if (esc) g_weaponMenu = false;
         if (enter)
         {
-            Request(1, g_catalog[g_selected].weapon);
+            if (g_cfg.re4Inventory)
+                PickerApply(g_catalog[g_pickList[g_selected]].name);
+            else
+                Request(1, g_catalog[g_selected].weapon);
             g_weaponMenu = false;
         }
     }
@@ -1750,20 +1767,26 @@ void WeaponMenuInput(bool focused)
 
 std::string WeaponMenuText()
 {
-    std::string t = "WEAPONS   Up/Down select   Left/Right page   Enter equip   F8 close\n\n";
+    bool pick = g_cfg.re4Inventory != 0;
+    size_t n = pick ? g_pickList.size() : g_catalog.size();
+    std::string t = pick ? PickerTitle() + "\nUp/Down select   Left/Right page   Enter use it   F8 close\n\n"
+                         : "WEAPONS   Up/Down select   Left/Right page   Enter equip   F8 close\n\n";
     size_t first = g_selected / 12 * 12;
-    for (size_t i = first; i < std::min(first + 12, g_catalog.size()); ++i)
+    for (size_t i = first; i < std::min(first + 12, n); ++i)
     {
+        const char* raw = g_catalog[pick ? g_pickList[i] : i].name;
         t += i == g_selected ? "> " : "   ";
-        std::string name = g_catalog[i].name;
+        std::string name = raw;
         for (auto& c : name)
             c = (char)toupper((unsigned char)c);
         t += name;
+        if (pick && PickerCurrent(raw))
+            t += "   (now)";
         t += "\n";
     }
     char page[64];
-    snprintf(page, sizeof(page), "\npage %zu / %zu   (%zu weapons)", first / 12 + 1, (g_catalog.size() + 11) / 12,
-             g_catalog.size());
+    snprintf(page, sizeof(page), "\npage %zu / %zu   (%zu %s)", first / 12 + 1, (n + 11) / 12, n,
+             pick ? "guns" : "weapons");
     return t + page;
 }
 
@@ -1972,7 +1995,63 @@ struct Arsenal
     DWORD runtimeStarted = 0;
     DWORD gunMismatchSince = 0, fragMismatchSince = 0, flashMismatchSince = 0; // self-correction timers
     std::string missing;        // MW2 gun name not in MW2's catalog (logged once)
+    bool remap = false;         // the F8 picker changed the MW2 gun for the equipped RE4 gun: arm it again
 } g_arm;
+
+bool PickerCurrent(const char* mw2) { return g_arm.gun >= 0 && g_gunMw2[g_arm.gun] == mw2; }
+
+std::string PickerTitle()
+{
+    return g_arm.gun >= 0 ? "MW2 GUN FOR: " + Upper(kGuns[g_arm.gun].label) : "MW2 GUN";
+}
+
+// F8 with Re4Inventory=1: list MW2's guns (no grenades or equipment) for the RE4 gun Leon has equipped.
+bool PickerStart()
+{
+    if (g_catalog.empty())
+    {
+        Notice("MW2 weapon list not received yet");
+        return false;
+    }
+    if (!g_arm.item || g_arm.gun < 0)
+    {
+        Notice("Equip an RE4 gun first (not the knife or a grenade)");
+        return false;
+    }
+    static const char* notGuns[] = { "grenade", "smoke", "flash", "concussion", "semtex", "stun" };
+    g_pickList.clear();
+    g_selected = 0;
+    for (size_t i = 0; i < g_catalog.size(); ++i)
+    {
+        const char* name = g_catalog[i].name;
+        bool skip = false;
+        for (const char* x : notGuns)
+            skip = skip || strstr(name, x);
+        if (skip)
+            continue;
+        if (PickerCurrent(name))
+            g_selected = g_pickList.size();
+        g_pickList.push_back(i);
+    }
+    return !g_pickList.empty();
+}
+
+// The picked MW2 gun now stands for the equipped RE4 gun (and its other versions), saved to [Guns].
+void PickerApply(const char* mw2)
+{
+    if (g_arm.gun < 0)
+        return;
+    const char* key = kGuns[g_arm.gun].key;
+    for (int i = 0; i < kGunCount; ++i)
+        if (!strcmp(kGuns[i].key, key))
+            g_gunMw2[i] = mw2;
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    WritePrivateProfileStringA("Guns", key, mw2, path);
+    g_arm.remap = true;
+    g_arm.missing.clear();
+    Log("picker: RE4 %s -> MW2 %s (saved to [Guns])", kGuns[g_arm.gun].label, mw2);
+}
 
 bool ArmRequest(uint32_t kind, uint32_t weapon, int clip, int stock, int expect = 1, int size = 0)
 {
@@ -2165,7 +2244,7 @@ void ArsenalUpdate(bool focused)
     uint8_t* eq = EquippedItem();
     int index = -1;
     const GunMap* want = eq ? GunFor(At<uint16_t>(eq, re4::Item_id), &index) : nullptr;
-    if (want && (eq != g_arm.item || !g_arm.weapon))
+    if (want && (eq != g_arm.item || !g_arm.weapon || g_arm.remap))
     {
         uint32_t weapon = CatalogWeapon(g_gunMw2[index]);
         if (!weapon && g_gunMw2[index] == "deserteaglegold")
@@ -2186,6 +2265,7 @@ void ArsenalUpdate(bool focused)
         int size = unlimited ? 0 : std::max(1, Capacity(eq));
         if (!ArmRequest(4, weapon, clip, stock, 1, size))
             return;
+        g_arm.remap = false;
         bool first = !g_arm.weapon;
         g_arm.item = eq;
         g_arm.itemId = At<uint16_t>(eq, re4::Item_id);
@@ -3101,6 +3181,7 @@ const char* kHelp =
     "V  melee          E  use: doors, items\n"
     "Guns and ammo: Leon's attache case\n"
     "F5  gun list in the case (on / off)\n"
+    "F8  pick the MW2 gun for the equipped RE4 gun\n"
     "F10  settings: FOV, mouse, ammo, skin, resolution\n"
     "F11  gun damage\n"
     "U  UAV radar (shows Ganados)\n"
