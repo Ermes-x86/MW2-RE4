@@ -716,10 +716,48 @@ BOOL CALLBACK MoveGuestWindow(HWND window, LPARAM pid)
 // Room collision: RE4's loaded SAT polygons (floors, slopes, walls) near the player, in host space.
 Triangle g_triangles[MaxTriangles];
 
+// Whether the triangle w (RE4 coordinates) covers the point (x, z) seen from above.
+bool OverPoint(const Vec3 w[3], float x, float z)
+{
+    auto side = [&](const Vec3& a, const Vec3& b) { return (b.x - a.x) * (z - a.z) - (b.z - a.z) * (x - a.x); };
+    float d0 = side(w[0], w[1]), d1 = side(w[1], w[2]), d2 = side(w[2], w[0]);
+    return (d0 >= 0 && d1 >= 0 && d2 >= 0) || (d0 <= 0 && d1 <= 0 && d2 <= 0);
+}
+
+// MW2 surface types (IW4 surfaceFlags bits 20-24) for footsteps.
+constexpr uint32_t kSurfConcrete = 5, kSurfDirt = 6, kSurfRock = 17, kSurfWood = 21;
+
+// The MW2 floor material for Leon's footsteps: village (rooms 1xx) wood indoors and dirt outdoors, castle (2xx)
+// stone, island (3xx) concrete indoors and dirt outdoors; anything else concrete or dirt.
+uint32_t FloorMaterial(bool roofed)
+{
+    uint8_t* g = Global();
+    uint32_t room = g ? At<uint16_t>(g, re4::G_curRoomId) : 0, area = room >> 8;
+    uint32_t material;
+    if (area == 1)
+        material = roofed ? kSurfWood : kSurfDirt;
+    else if (area == 2)
+        material = roofed ? kSurfConcrete : kSurfRock;
+    else
+        material = roofed ? kSurfConcrete : kSurfDirt;
+    static uint32_t s_room = ~0u, s_material = ~0u;
+    if (room != s_room || material != s_material)
+    {
+        static const char* names[32] = { nullptr };
+        names[kSurfConcrete] = "concrete"; names[kSurfDirt] = "dirt"; names[kSurfRock] = "rock"; names[kSurfWood] = "wood";
+        Log("footsteps: room %03X %s -> %s", room, roofed ? "indoors" : "outdoors", names[material]);
+        s_room = room;
+        s_material = material;
+    }
+    return material;
+}
+
 uint32_t GatherCollision(const Vec3& center)
 {
     uint32_t n = 0;
+    bool roofed = false;
     const float r = g_cfg.collisionRadius * g_cfg.unitsPerMeter, rv = 6.f * g_cfg.unitsPerMeter;
+    const float head = 1.9f * g_cfg.unitsPerMeter; // anything over Leon's head counts as a ceiling
     __try
     {
         uint8_t* mgr = g_satMgr;
@@ -763,10 +801,12 @@ uint32_t GatherCollision(const Vec3& center)
                 Vec3 c{ e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x };
                 if (c.x * c.x + c.y * c.y + c.z * c.z < 1.f) // degenerate (area below ~0.5 mm^2)
                     continue;
+                if (!roofed && minY > center.y + head && OverPoint(w, center.x, center.z))
+                    roofed = true;
                 Triangle& t = g_triangles[n++];
                 for (int k = 0; k < 3; ++k)
                     ToHost(w[k], t.vertices[k]);
-                t.surface = 0; // static world, generic material
+                t.surface = 0; // static world; the floor material is set below
             }
         }
     }
@@ -774,6 +814,11 @@ uint32_t GatherCollision(const Vec3& center)
     {
         Log("collision read faulted; sending %u triangles", n);
     }
+    // RE4's collision has no floor material, so MW2 (which plays no footstep on material 0) gets one from where
+    // Leon is: the area (room number) and whether a ceiling is over his head.
+    uint32_t material = FloorMaterial(roofed);
+    for (uint32_t i = 0; i < n; ++i)
+        g_triangles[i].surface = material;
     return n;
 }
 
