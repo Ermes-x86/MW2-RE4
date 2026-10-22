@@ -1,9 +1,476 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index aeeab8e..298e884 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2185,6 +2185,7 @@ dependencies = [
+  "asset_core",
+  "asset_game",
+  "asset_material",
++ "asset_model",
+  "asset_transport",
+  "assets",
+  "audio",
+@@ -5687,6 +5688,7 @@ dependencies = [
+  "net",
+  "perf",
+  "playerstate_iw4",
++ "png",
+  "render_anim",
+  "render_frame",
+  "render_fx",
+diff --git a/crates/asset_game/src/weapon_catalog/capture_iw4.rs b/crates/asset_game/src/weapon_catalog/capture_iw4.rs
+index cf51c38..c1fa4f0 100644
+--- a/crates/asset_game/src/weapon_catalog/capture_iw4.rs
++++ b/crates/asset_game/src/weapon_catalog/capture_iw4.rs
+@@ -62,6 +62,11 @@ impl WeaponCatalog {
+             .and_then(|ptr| stream.cstr(ptr).ok())
+             .filter(|s| !s.is_empty())
+             .map(str::to_owned);
++        let knife_xmodel = geometry
++            .knife_model_name
++            .and_then(|ptr| stream.cstr(ptr).ok())
++            .filter(|s| !s.is_empty())
++            .map(str::to_owned);
+         let sz_xanims = geometry
+             .sz_xanims
+             .map(|arr| read_sz_xanims(stream, arr))
+@@ -144,7 +149,7 @@ impl WeaponCatalog {
+             skin_parent: None,
+             projectile_model,
+             rocket_model,
+-            knife_xmodel: None,
++            knife_xmodel,
+             dual_wield_weapon: None,
+             sz_xanims,
+             sz_xanims_right,
+diff --git a/crates/asset_model/src/lib.rs b/crates/asset_model/src/lib.rs
+index 3bc033f..05d474d 100644
+--- a/crates/asset_model/src/lib.rs
++++ b/crates/asset_model/src/lib.rs
+@@ -8,6 +8,7 @@ mod model_skel;
+ mod model_skel_t6;
+ mod packed_vertex;
+ mod projectile_mesh_catalog;
++pub mod re4_leon_style;
+ mod soldiers;
+ mod world_weapon_catalog;
+ 
+diff --git a/crates/asset_model/src/re4_leon_style.rs b/crates/asset_model/src/re4_leon_style.rs
+new file mode 100644
+index 0000000..d70ca33
+--- /dev/null
++++ b/crates/asset_model/src/re4_leon_style.rs
+@@ -0,0 +1,388 @@
++//! MW2-RE4: Leon-style first-person arms (shared state and the paint recipe).
++//!
++//! With `IW4L_RE4_LEON_STYLE` set (the host loads mp_subbase), the map's two arms models stand for Leon's two
++//! looks in RE4: the axis' thick arctic sleeves are Leon in his leather jacket, the allies' slim SEAL wetsuit
++//! arms are Leon without it (short dark sleeves, bare forearms). Both keep MW2's mesh and animation; their
++//! images are repainted (render_frontend `re4_leon_style`) by which bones each texel's triangle hangs on: upper
++//! arm, forearm, hand (wrist, palm, first finger joints: Leon's fingerless gloves) or finger tips. The host reports the look RE4 shows (`set_look`) and the
++//! first-person view takes that side's arms (`arms_axis`).
++use std::sync::atomic::{AtomicU8, Ordering};
++
++use crate::FpvSkel;
++
++const VAR: &str = "IW4L_RE4_LEON_STYLE";
++
++/// What RE4 shows: 0 not known yet, 1 jacket, 2 no jacket.
++static LOOK: AtomicU8 = AtomicU8::new(0);
++
++pub fn enabled() -> bool {
++    std::env::var_os(VAR).is_some_and(|v| v != "0")
++}
++
++pub fn set_look(look: u32) {
++    let look = match look {
++        1 | 2 => look as u8,
++        _ => 0,
++    };
++    LOOK.store(look, Ordering::Relaxed);
++}
++
++/// Whether the no-jacket look is used when RE4 reports it. Off for now: MW2 has no bare-forearm arms, and the
++/// SEAL sleeve painted as skin did not look right, so Leon keeps the jacket arms all game.
++pub const BARE_LOOK: bool = false;
++
++/// The side whose arms the first-person view shows: jacket = axis (arctic), no jacket = allies (SEAL wetsuit).
++/// None when the style is off (the game's own team choice stands).
++pub fn arms_axis() -> Option<bool> {
++    if !enabled() {
++        return None;
++    }
++    match LOOK.load(Ordering::Relaxed) {
++        2 if BARE_LOOK => Some(false),
++        _ => Some(true),
++    }
++}
++
++/// How a texel is painted.
++pub const LABEL_NONE: u8 = 0;
++pub const LABEL_ARM: u8 = 1;
++pub const LABEL_HAND: u8 = 2;
++pub const LABEL_FINGERTIP: u8 = 3;
++pub const LABEL_UPPER: u8 = 4;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Look {
++    /// leather sleeves, black fingerless gloves
++    Jacket,
++    /// short dark sleeves, bare forearms, black fingerless gloves
++    Bare,
++}
++
++/// Which look an arms model stands for: the slim SEAL wetsuit arms are the bare ones.
++pub fn look_of_model(name: &str) -> Look {
++    if name.to_ascii_lowercase().contains("udt") { Look::Bare } else { Look::Jacket }
++}
++
++fn bone_label(name: &str) -> u8 {
++    let n = name.to_ascii_lowercase();
++    let finger = ["j_thumb_", "j_index_", "j_mid_", "j_ring_", "j_pinky_"].iter().find(|p| n.starts_with(**p));
++    if let Some(prefix) = finger {
++        // j_index_le_1 is the first joint; Leon's gloves stop past it (the thumb's first joint sits in the palm)
++        let joint = n.rsplit('_').next().and_then(|d| d.parse::<u32>().ok()).unwrap_or(1);
++        let covered = if *prefix == "j_thumb_" { 2 } else { 1 };
++        return if joint <= covered { LABEL_HAND } else { LABEL_FINGERTIP };
++    }
++    if (n.starts_with("j_wrist_") && !n.starts_with("j_wristtwist")) || n.starts_with("j_webbing") || n.starts_with("j_palm")
++    {
++        return LABEL_HAND;
++    }
++    if n.starts_with("j_shoulder") || n.starts_with("j_clavicle") {
++        return LABEL_UPPER;
++    }
++    LABEL_ARM
++}
++
++fn vertex_weights(skel: &FpvSkel, v: usize) -> [(usize, f32); 4] {
++    let mut out = [(0usize, 0.0f32); 4];
++    let Some(skin) = skel.vert_skin.get(v) else { return out };
++    let mut extras = 0.0;
++    for extra in 1..4 {
++        if skin.has_extra_weight(extra) {
++            let w = f32::from(skin.extra_weight(extra)) / 65536.0;
++            out[extra] = (usize::from(skin.bones[extra]), w);
++            extras += w;
++        }
++    }
++    out[0] = (usize::from(skin.bones[0]), if skin.primary_is_zero() { 0.0 } else { 1.0 - extras });
++    out
++}
++
++/// A `width` x `height` label map of the texels `skel`'s surfaces `surfaces` cover (LABEL_*), grown a few texels
++/// past the UV islands' edges so filtering at seams finds the same paint.
++pub fn uv_labels(skel: &FpvSkel, surfaces: &[usize], width: u32, height: u32) -> Vec<u8> {
++    let (w, h) = (width as usize, height as usize);
++    let uvs: Vec<[f32; 2]> = skel.uvs().collect();
++    let bone_labels: Vec<u8> = skel.bone_names.iter().map(|n| bone_label(n)).collect();
++    // per vertex: share of weight on arm / hand / finger tip / upper arm
++    let shares: Vec<[f32; 4]> = (0..skel.positions.len())
++        .map(|v| {
++            let mut s = [0.0f32; 4];
++            for (bone, weight) in vertex_weights(skel, v) {
++                if weight > 0.0 {
++                    let label = bone_labels.get(bone).copied().unwrap_or(LABEL_ARM);
++                    s[usize::from(label - 1)] += weight;
++                }
++            }
++            s
++        })
++        .collect();
++    let mut labels = vec![LABEL_NONE; w * h];
++    for &s in surfaces {
++        let Some(&(i0, n)) = skel.surface_index_ranges.get(s) else { continue };
++        let Some(tris) = skel.indices.get(i0..i0 + n) else { continue };
++        for t in tris.chunks_exact(3) {
++            let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
++            let (Some(ua), Some(ub), Some(uc)) = (uvs.get(a), uvs.get(b), uvs.get(c)) else { continue };
++            let p = |uv: &[f32; 2]| [uv[0] * width as f32, uv[1] * height as f32];
++            let (pa, pb, pc) = (p(ua), p(ub), p(uc));
++            let area = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pc[0] - pa[0]) * (pb[1] - pa[1]);
++            if area.abs() < 1e-6 {
++                continue;
++            }
++            let min_x = pa[0].min(pb[0]).min(pc[0]).floor() as i64;
++            let max_x = pa[0].max(pb[0]).max(pc[0]).ceil() as i64;
++            let min_y = pa[1].min(pb[1]).min(pc[1]).floor() as i64;
++            let max_y = pa[1].max(pb[1]).max(pc[1]).ceil() as i64;
++            for y in min_y..=max_y {
++                for x in min_x..=max_x {
++                    let q = [x as f32 + 0.5, y as f32 + 0.5];
++                    let wa = ((pb[0] - q[0]) * (pc[1] - q[1]) - (pc[0] - q[0]) * (pb[1] - q[1])) / area;
++                    let wb = ((pc[0] - q[0]) * (pa[1] - q[1]) - (pa[0] - q[0]) * (pc[1] - q[1])) / area;
++                    let wc = 1.0 - wa - wb;
++                    if wa < -0.01 || wb < -0.01 || wc < -0.01 {
++                        continue;
++                    }
++                    let mut best = 0;
++                    let mut share = [0.0f32; 4];
++                    for k in 0..4 {
++                        share[k] = shares[a][k] * wa + shares[b][k] * wb + shares[c][k] * wc;
++                        if share[k] > share[best] {
++                            best = k;
++                        }
++                    }
++                    let tx = x.rem_euclid(w as i64) as usize;
++                    let ty = y.rem_euclid(h as i64) as usize;
++                    labels[ty * w + tx] = best as u8 + 1;
++                }
++            }
++        }
++    }
++    // grow islands by a few texels (UV padding)
++    let grow = (width.max(height) / 256).max(2) as usize;
++    for _ in 0..grow {
++        let src = labels.clone();
++        for y in 0..h {
++            for x in 0..w {
++                if src[y * w + x] != LABEL_NONE {
++                    continue;
++                }
++                let near = [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)]
++                    .into_iter()
++                    .filter(|&(nx, ny)| nx < w && ny < h)
++                    .map(|(nx, ny)| src[ny * w + nx])
++                    .find(|&l| l != LABEL_NONE);
++                if let Some(l) = near {
++                    labels[y * w + x] = l;
++                }
++            }
++        }
++    }
++    labels
++}
++
++fn luma(p: &[u8]) -> f32 {
++    (0.299 * f32::from(p[0]) + 0.587 * f32::from(p[1]) + 0.114 * f32::from(p[2])) / 255.0
++}
++
++/// Box blur of a single channel, radius `r`, wrapping.
++fn blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
++    let mut tmp = vec![0.0f32; w * h];
++    let span = (2 * r + 1) as f32;
++    for y in 0..h {
++        let row = &src[y * w..(y + 1) * w];
++        let mut sum: f32 = (0..=2 * r).map(|i| row[(i + w - r % w) % w]).sum();
++        for x in 0..w {
++            tmp[y * w + x] = sum / span;
++            sum += row[(x + r + 1) % w] - row[(x + w - r % w) % w];
++        }
++    }
++    let mut out = vec![0.0f32; w * h];
++    for x in 0..w {
++        let mut sum: f32 = (0..=2 * r).map(|i| tmp[((i + h - r % h) % h) * w + x]).sum();
++        for y in 0..h {
++            out[y * w + x] = sum / span;
++            sum += tmp[((y + r + 1) % h) * w + x] - tmp[((y + h - r % h) % h) * w + x];
++        }
++    }
++    out
++}
++
++fn srgb_mul(base: [f32; 3], k: f32) -> [u8; 3] {
++    base.map(|c| (c * k).clamp(0.0, 255.0) as u8)
++}
++
++/// The surfaces Leon's arms are painted with. Colours and grain follow the user's own hand-painted arms
++/// (measured from their painting: the mean colour of each part and how much it varies), so every player gets
++/// that look without any image being shipped.
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Surface {
++    Leather,
++    Glove,
++    Shirt,
++    Skin,
++}
++
++impl Surface {
++    /// sRGB base colour, share of MW2's shading detail kept, mottle strength
++    fn recipe(self) -> ([f32; 3], f32, f32) {
++        match self {
++            Surface::Leather => ([92.0, 76.0, 57.0], 0.6, 0.85),
++            Surface::Glove => ([17.0, 17.0, 16.0], 0.6, 0.12),
++            Surface::Shirt => ([29.0, 30.0, 29.0], 0.4, 0.06),
++            Surface::Skin => ([185.0, 153.0, 124.0], 0.4, 0.14),
++        }
++    }
++}
++
++/// What `label` becomes in `look` (`glove`: the image is the gloves', where the arm texels are the glove's cuff).
++/// None = MW2's texel stays.
++fn surface_of(look: Look, glove: bool, label: u8) -> Option<Surface> {
++    match (look, label) {
++        (_, LABEL_HAND) => Some(Surface::Glove),
++        (_, LABEL_FINGERTIP) => Some(Surface::Skin),
++        (_, LABEL_ARM | LABEL_UPPER) if glove => Some(Surface::Glove),
++        (Look::Jacket, LABEL_ARM | LABEL_UPPER) => Some(Surface::Leather),
++        (Look::Bare, LABEL_UPPER) => Some(Surface::Shirt),
++        (Look::Bare, LABEL_ARM) => Some(Surface::Skin),
++        _ => None,
++    }
++}
++
++/// Cloud-like fractal noise in about 0..1; `period` is the largest feature in texels.
++fn clouds(x: f32, y: f32, period: f32, seed: u32) -> f32 {
++    let (mut sum, mut amp, mut norm, mut p) = (0.0, 1.0, 0.0, period);
++    for octave in 0..4 {
++        sum += amp * value_noise(x / p, y / p, seed + octave);
++        norm += amp;
++        amp *= 0.5;
++        p *= 0.5;
++    }
++    sum / norm
++}
++
++/// Hand-painted details of the jacket sleeve image (`arctic_b_sleeve_col`), in texels of a 1024 x 1024 image:
++/// three stitched seams and a fur strip along the cuff.
++const JACKET_SLEEVE_IMAGE: &str = "arctic_b_sleeve_col";
++const SEAMS: [[f32; 4]; 3] = [[7.0, 177.0, 671.0, 306.0], [27.0, 595.0, 560.0, 551.0], [126.0, 133.0, 163.0, 618.0]];
++/// fur strip: top edge from (x0, y0) to (x1, y1), then `FUR_DEPTH` texels down
++const FUR_TOP: [f32; 4] = [25.0, 641.0, 522.0, 602.0];
++const FUR_DEPTH: f32 = 36.0;
++
++fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
++    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
++}
++
++/// The jacket sleeve's details at texel (x, y) in 1024-space, if any: fur, the dark edge above it, or a seam.
++fn jacket_detail(x: f32, y: f32) -> Option<[f32; 3]> {
++    let [x0, y0, x1, y1] = FUR_TOP;
++    if (x0..=x1).contains(&x) {
++        let base_top = y0 + (y1 - y0) * (x - x0) / (x1 - x0);
++        let top = base_top + 4.0 * (clouds(x, 0.5, 12.0, 21) - 0.5);
++        if y >= top && y <= base_top + FUR_DEPTH {
++            let t = clouds(x, y, 10.0, 22);
++            return Some(mix([150.0, 128.0, 88.0], [214.0, 190.0, 140.0], ((t - 0.5) * 2.2 + 0.5).clamp(0.0, 1.0)));
++        }
++        if y >= top - 2.5 && y < top {
++            return Some([48.0, 34.0, 24.0]);
++        }
++    }
++    for [ax, ay, bx, by] in SEAMS {
++        let (dx, dy) = (bx - ax, by - ay);
++        let len2 = dx * dx + dy * dy;
++        let t = (((x - ax) * dx + (y - ay) * dy) / len2).clamp(0.0, 1.0);
++        let (px, py) = (ax + dx * t, ay + dy * t);
++        let d = ((x - px).powi(2) + (y - py).powi(2)).sqrt();
++        if d <= 2.6 {
++            let along = t * len2.sqrt();
++            let streak = value_noise(along / 6.0, d, 23);
++            let core = mix([96.0, 56.0, 36.0], [136.0, 82.0, 52.0], streak);
++            return Some(if d > 1.8 { mix(core, [62.0, 38.0, 26.0], 0.7) } else { core });
++        }
++    }
++    None
++}
++
++/// Paint the colour map `rgba` (top level, `width` x `height`, image `image`) by `labels` for `look`. Each part
++/// gets its colour with a cloudy mottle and a little of MW2's own shading detail (its luminance minus a blur,
++/// clamped so camouflage blotches do not come through); the jacket sleeve also gets its seams and fur strip.
++pub fn paint(look: Look, glove: bool, image: &str, labels: &[u8], width: u32, height: u32, rgba: &mut [u8]) {
++    let (w, h) = (width as usize, height as usize);
++    if labels.len() != w * h || rgba.len() != w * h * 4 {
++        return;
++    }
++    let l: Vec<f32> = rgba.chunks_exact(4).map(luma).collect();
++    let wide = blur(&l, w, h, (w.max(h) / 128).max(2));
++    // design coordinates are texels of a 1024 x 1024 image
++    let (sx, sy) = (1024.0 / width as f32, 1024.0 / height as f32);
++    let jacket_sleeve = look == Look::Jacket && image.eq_ignore_ascii_case(JACKET_SLEEVE_IMAGE);
++    for i in 0..w * h {
++        let Some(surface) = surface_of(look, glove, labels[i]) else { continue };
++        let (x, y) = ((i % w) as f32 * sx, (i / w) as f32 * sy);
++        let (mut base, gain, mottle) = surface.recipe();
++        let detail = (l[i] - wide[i]).clamp(-0.07, 0.07);
++        let mut k = 1.0 + gain * detail;
++        match surface {
++            Surface::Leather => {
++                k *= 1.0 + mottle * (clouds(x, y, 22.0, 1) - 0.5) + 0.12 * (value_noise(x / 1.5, y / 1.5, 5) - 0.5)
++            }
++            Surface::Skin => {
++                k *= 1.0 + mottle * (clouds(x, y, 90.0, 2) - 0.5);
++                base[0] *= 1.0 + 0.05 * (value_noise(x / 170.0, y / 170.0, 3) - 0.5);
++            }
++            _ => k *= 1.0 + mottle * (clouds(x, y, 24.0, 4) - 0.5),
++        }
++        let mut color = base.map(|c| c * k);
++        if jacket_sleeve && surface == Surface::Leather {
++            if let Some(painted) = jacket_detail(x, y) {
++                color = painted.map(|c| c * (1.0 + gain * detail));
++            }
++        }
++        for c in 0..3 {
++            rgba[i * 4 + c] = color[c].clamp(0.0, 255.0) as u8;
++        }
++    }
++}
++
++fn hash(x: i64, y: i64, seed: u32) -> f32 {
++    let mut n = (x as u32).wrapping_mul(0x27d4_eb2d) ^ (y as u32).wrapping_mul(0x1656_67b1) ^ seed.wrapping_mul(0x9e37_79b9);
++    n ^= n >> 15;
++    n = n.wrapping_mul(0x85eb_ca6b);
++    n ^= n >> 13;
++    (n & 0xffff) as f32 / 65535.0
++}
++
++/// Smooth value noise in 0..1.
++fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
++    let (x0, y0) = (x.floor(), y.floor());
++    let (fx, fy) = (x - x0, y - y0);
++    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
++    let (ix, iy) = (x0 as i64, y0 as i64);
++    let top = hash(ix, iy, seed) * (1.0 - sx) + hash(ix + 1, iy, seed) * sx;
++    let bottom = hash(ix, iy + 1, seed) * (1.0 - sx) + hash(ix + 1, iy + 1, seed) * sx;
++    top * (1.0 - sy) + bottom * sy
++}
++
++/// Smooth the normal map where skin now shows (bare forearms, finger tips): cloth wrinkles fade into a wide blur
++/// of themselves (a quarter kept), whatever the map's channel layout.
++pub fn smooth_normals(look: Look, glove: bool, labels: &[u8], width: u32, height: u32, rgba: &mut [u8]) {
++    let (w, h) = (width as usize, height as usize);
++    if labels.len() != w * h || rgba.len() != w * h * 4 {
++        return;
++    }
++    let skin = |label: u8| surface_of(look, glove, label) == Some(Surface::Skin);
++    if !labels.iter().any(|&l| skin(l)) {
++        return;
++    }
++    let radius = (w.max(h) / 32).max(2);
++    let channels: Vec<Vec<f32>> = (0..4)
++        .map(|c| blur(&rgba.iter().skip(c).step_by(4).map(|&v| f32::from(v)).collect::<Vec<_>>(), w, h, radius))
++        .collect();
++    for i in 0..w * h {
++        if skin(labels[i]) {
++            for c in 0..4 {
++                let kept = f32::from(rgba[i * 4 + c]) * 0.25 + channels[c][i] * 0.75;
++                rgba[i * 4 + c] = kept.round().clamp(0.0, 255.0) as u8;
++            }
++        }
++    }
++}
+diff --git a/crates/bootstrap/Cargo.toml b/crates/bootstrap/Cargo.toml
+index a8620ac..981e5b3 100644
+--- a/crates/bootstrap/Cargo.toml
++++ b/crates/bootstrap/Cargo.toml
+@@ -24,6 +24,7 @@ asset_audio.workspace = true
+ asset_core.workspace = true
+ asset_game.workspace = true
+ asset_material.workspace = true
++asset_model.workspace = true
+ asset_transport.workspace = true
+ assets.workspace = true
+ audio.workspace = true
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..941e319 100644
+index 32839dd..21891d6 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
-@@ -481,7 +481,14 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+@@ -479,9 +479,18 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+         }
+         bridge.host = unsafe { memory.read(HOST) };
          bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
++        // MW2-RE4: Leon's look in RE4 (1 jacket, 2 none) for Leon-style arms
++        asset_model::re4_leon_style::set_look(bridge.host_movement.reserved[3]);
          bridge.host_lock = unsafe { memory.read(HOST_LOCK) };
          bridge.features.request = unsafe { memory.read(features::BASE) };
 -        bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
@@ -18,7 +485,7 @@ index 32839dd..941e319 100644
          bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
      }
      if let Some(_guard) = memory.lock_scene() {
-@@ -681,8 +688,8 @@ fn anchor_authority(
+@@ -681,8 +690,8 @@ fn anchor_authority(
          let origin = ps.origin;
          let released = scene.release_traps(
              ps.origin,
@@ -29,7 +496,7 @@ index 32839dd..941e319 100644
              0x0281_0011,
              &mut bridge.ghosts,
          );
-@@ -772,8 +779,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+@@ -772,8 +781,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
      direction = direction.map(|d| d / length);
      match scene.unblock_lift(
          ps.origin,
@@ -127,10 +594,28 @@ index c415d3c..6fc3b2f 100644
              bridge.features.loadout.save(world, ps);
          }
 diff --git a/crates/bootstrap/src/gta_collision.rs b/crates/bootstrap/src/gta_collision.rs
-index 56d4052..7add3de 100644
+index 56d4052..446ca44 100644
 --- a/crates/bootstrap/src/gta_collision.rs
 +++ b/crates/bootstrap/src/gta_collision.rs
-@@ -373,8 +373,23 @@ impl HostCollision {
+@@ -23,6 +23,9 @@ struct Surface {
+     maxs: [f32; 3],
+     /// Host entity identity for movable vehicles, peds and props; 0 is static.
+     tag: u32,
++    /// IW4 surfaceFlags of every plane: the host's surface type (triangle.surface low byte) in bits 20-24, so
++    /// footsteps and impacts know the floor (MW2-RE4: wood, dirt, stone ...). 0 = default: no footsteps.
++    flags: [u32; MAX_PLANES],
+ }
+ /// What `release_traps` did to free a player IW4's recovery could not.
+ #[derive(Debug, Default, PartialEq)]
+@@ -168,6 +171,7 @@ impl HostCollision {
+                 mins,
+                 maxs,
+                 tag: triangle.surface >> 8,
++                flags: [(triangle.surface & 0x1f) << 20; MAX_PLANES],
+             };
+             let distance = dot(normal, a);
+             // A thin closed prism supplies both sides of each genuine GTA face
+@@ -373,8 +377,23 @@ impl HostCollision {
          )
      }
  }
@@ -154,7 +639,7 @@ index 56d4052..7add3de 100644
          if !input
              .start
              .iter()
-@@ -421,6 +436,7 @@ impl CollisionBackend for HostCollision {
+@@ -421,6 +440,7 @@ impl CollisionBackend for HostCollision {
          Coverage::Complete
      }
      fn trace(&self, input: GroundTraceInput) -> Trace {
@@ -162,6 +647,426 @@ index 56d4052..7add3de 100644
          let mins: [f32; 3] =
              std::array::from_fn(|i| input.start[i].min(input.end[i]) + input.mins[i] - 0.25);
          let maxs: [f32; 3] =
+@@ -434,7 +454,7 @@ impl CollisionBackend for HostCollision {
+                 .map(|surface| BrushRef {
+                     planes: surface.planes(),
+                     contents: 1,
+-                    plane_surface_flags: &[],
++                    plane_surface_flags: &surface.flags[..surface.count],
+                     glass_encoded: 0,
+                 }),
+             input.start,
+diff --git a/crates/fastfile_iw4/src/load/weapon.rs b/crates/fastfile_iw4/src/load/weapon.rs
+index fb04dfb..be4f217 100644
+--- a/crates/fastfile_iw4/src/load/weapon.rs
++++ b/crates/fastfile_iw4/src/load/weapon.rs
+@@ -38,6 +38,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
+         world_model_names,
+         projectile_model_name,
+         rocket_model_name,
++        knife_model_name,
+         sound_names,
+         sz_xanims_right,
+         sz_xanims_left,
+@@ -51,13 +52,14 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
+                 [None; 16],
+                 None,
+                 None,
++                None,
+                 WeaponSoundNames::default(),
+                 None,
+                 None,
+             )
+         }
+         _ if s.begin_body(p.at(s.layout(4, 8)))? => {
+-            let (body, gun0, hand0, world0, proj0, rocket0, sounds, anim_r, anim_l) =
++            let (body, gun0, hand0, world0, proj0, rocket0, knife0, sounds, anim_r, anim_l) =
+                 load_weapon_def(s, links, ai_vs_ai_knots, ai_vs_player_knots)?;
+             (
+                 Some(body),
+@@ -66,6 +68,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
+                 world0,
+                 proj0,
+                 rocket0,
++                knife0,
+                 sounds,
+                 anim_r,
+                 anim_l,
+@@ -78,6 +81,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
+             [None; 16],
+             None,
+             None,
++            None,
+             WeaponSoundNames::default(),
+             None,
+             None,
+@@ -398,6 +402,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
+         world_model_names,
+         projectile_model_name,
+         rocket_model_name,
++        knife_model_name,
+         sz_xanims,
+         sz_xanims_right,
+         sz_xanims_left,
+@@ -850,6 +855,7 @@ fn load_weapon_def(
+     [Option<Ptr>; 16],
+     Option<Ptr>,
+     Option<Ptr>,
++    Option<Ptr>,
+     WeaponSoundNames,
+     Option<Ptr>,
+     Option<Ptr>,
+@@ -939,7 +945,8 @@ fn load_weapon_def(
+     let world0 = follow_xmodel_array(s, links, p, s.layout(472, 736))?;
+     asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(476, 744)))?;
+     let rocket0 = follow_xmodel_ptr(s, links, p.at(s.layout(480, 752)))?;
+-    asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(484, 760)))?;
++    // knifeModel: the knife drawn on tag_knife_attach during melee (MW2-RE4: was only linked, never named)
++    let knife0 = follow_xmodel_ptr(s, links, p.at(s.layout(484, 760)))?;
+     asset_ptr_at(s, links, AssetType::XModel, p.at(s.layout(488, 768)))?;
+     asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(492, 776)))?;
+     asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(500, 792)))?;
+@@ -1003,6 +1010,7 @@ fn load_weapon_def(
+         world0,
+         projectile0,
+         rocket0,
++        knife0,
+         sound_names,
+         sz_xanims_right,
+         sz_xanims_left,
+diff --git a/crates/fastfile_iw4/src/zone.rs b/crates/fastfile_iw4/src/zone.rs
+index 4812938..ff049a3 100644
+--- a/crates/fastfile_iw4/src/zone.rs
++++ b/crates/fastfile_iw4/src/zone.rs
+@@ -942,6 +942,8 @@ pub struct WeaponGeometry {
+ 
+     pub rocket_model_name: Option<Ptr>,
+ 
++    pub knife_model_name: Option<Ptr>,
++
+     pub sz_xanims: Option<Ptr>,
+ 
+     pub sz_xanims_right: Option<Ptr>,
+diff --git a/crates/render_anim/src/occupancy/fpv_present.rs b/crates/render_anim/src/occupancy/fpv_present.rs
+index c8a89b8..272e9d9 100644
+--- a/crates/render_anim/src/occupancy/fpv_present.rs
++++ b/crates/render_anim/src/occupancy/fpv_present.rs
+@@ -275,7 +275,9 @@ pub fn spawn_pending_fpv(
+         .and_then(|snap| snap.meta.for_client(local.0));
+     let ffa_team = meta.and_then(|m| m.ffa_team);
+     let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
+-    let axis = asset_model::kit_assignment_is_axis(client_state_team, ffa_team);
++    // MW2-RE4: Leon-style arms take the side whose arms match RE4's look (jacket or not)
++    let axis = asset_model::re4_leon_style::arms_axis()
++        .unwrap_or_else(|| asset_model::kit_assignment_is_axis(client_state_team, ffa_team));
+     let view = match bound_table.slot(request.weapon_handle, request.parent_handle, axis) {
+         Ok(FpvWeaponSlot::Ready(view)) => Arc::clone(view),
+         Ok(FpvWeaponSlot::Refused(cause)) => {
+@@ -610,6 +612,24 @@ pub fn tick_fpv_viewmodel(
+         product.kind = FpvPoseKind::Refuse(FpvPoseRefuse::CatalogMissing);
+         return;
+     };
++    // MW2-RE4: RE4's look changed (Leon lost his jacket): build the view again with the other side's arms
++    if asset_model::re4_leon_style::arms_axis().is_some_and(|axis| axis != session.axis) {
++        if let Some((weapon_handle, parent_handle)) =
++            owners.handles(presented.weapon_epoch(), session.weapon_id, session.parent_weapon)
++        {
++            pending.0 = Some(PendingFpvSpawnRequest {
++                weapon_handle,
++                parent_handle,
++                gun_index: session.fpv.gun_index,
++                catalog_id: fpv.0.identity(),
++                weapon_id: session.weapon_id,
++                parent_weapon: session.parent_weapon,
++            });
++            diag::info!(Fpv, "fpv: RE4 Leon look changed; arms of the other side");
++            product.kind = FpvPoseKind::Hide;
++            return;
++        }
++    }
+ 
+     if let Some(ps) = presented.viewweapon_player(local.0) {
+         let weapon = table.map_or(get_viewmodel_weapon_index(ps), |t| {
+diff --git a/crates/render_frontend/Cargo.toml b/crates/render_frontend/Cargo.toml
+index 344374b..9c77070 100644
+--- a/crates/render_frontend/Cargo.toml
++++ b/crates/render_frontend/Cargo.toml
+@@ -13,6 +13,7 @@ asset_world.workspace = true
+ asset_core.workspace = true
+ asset_material.workspace = true
+ asset_model.workspace = true
++png.workspace = true
+ asset_transport.workspace = true
+ assets.workspace = true
+ xmodel_runtime.workspace = true
+diff --git a/crates/render_frontend/src/prepare/scene/mod.rs b/crates/render_frontend/src/prepare/scene/mod.rs
+index 4070734..e3a1e50 100644
+--- a/crates/render_frontend/src/prepare/scene/mod.rs
++++ b/crates/render_frontend/src/prepare/scene/mod.rs
+@@ -2,6 +2,7 @@ pub mod camera;
+ pub mod cell_frustum_cmds;
+ pub mod cull;
+ pub mod frustum;
++pub(crate) mod re4_leon_style;
+ pub mod gfx_scene;
+ pub mod model_lighting_atlas;
+ pub mod model_lighting_cache;
+diff --git a/crates/render_frontend/src/prepare/scene/re4_leon_style.rs b/crates/render_frontend/src/prepare/scene/re4_leon_style.rs
+new file mode 100644
+index 0000000..a522e35
+--- /dev/null
++++ b/crates/render_frontend/src/prepare/scene/re4_leon_style.rs
+@@ -0,0 +1,229 @@
++//! MW2-RE4: Leon-style first-person arms. MW2's own arms models are kept (their fit and animation are MW2's);
++//! only their colour maps are repainted from the player's own MW2 images while the map's images are handed to
++//! the GPU (`asset_model::re4_leon_style`: the jacket arms get Leon's brown leather, the bare arms his short
++//! dark sleeves and skin with the cloth wrinkles smoothed out of their normal map, both black fingerless gloves). Nothing is shipped: the recipe is code, the pixels come from the
++//! player's MW2.
++//!
++//! `IW4L_RE4_LEON_PAINT=<folder>`: a `<image>.png` there (same size as MW2's image) is used instead of the
++//! automatic paint, for players who paint their own. `IW4L_DUMP_FPV=<folder>`: every arms colour map is saved
++//! there as `<image>.png` (MW2's original, to paint over), `<image>_leon.png` and `<image>_labels.png`.
++use std::collections::HashMap;
++use std::path::Path;
++use std::sync::Arc;
++
++use asset_model::re4_leon_style::{self as style, Look};
++use bevy::prelude::*;
++use bevy::render::render_resource::{Extent3d, TextureFormat};
++
++use super::world::WorldScene;
++
++/// Which arms models' surfaces use each material: material asset id -> [(mesh index, surfaces, look)].
++type Uses = HashMap<usize, Vec<(usize, Vec<usize>, Look)>>;
++
++fn arms_material_uses(fpv: &assets::PreparedFpvMeshes) -> Uses {
++    let mut uses: Uses = HashMap::new();
++    for i in 0..fpv.0.len() {
++        let Some(mesh) = fpv.0.get_at(i) else { continue };
++        let name = mesh.skel.name.to_ascii_lowercase();
++        if !asset_model::is_arms_model(&name) {
++            continue;
++        }
++        let look = style::look_of_model(&name);
++        if look == Look::Bare && !style::BARE_LOOK {
++            continue;
++        }
++        let mut by_material: HashMap<usize, Vec<usize>> = HashMap::new();
++        for (s, edge) in mesh.material_edges.iter().enumerate() {
++            if let Some(material) = edge.bound_index() {
++                by_material.entry(material).or_default().push(s);
++            }
++        }
++        for (material, surfaces) in by_material {
++            uses.entry(material).or_default().push((i, surfaces, look));
++        }
++    }
++    uses
++}
++
++fn file_name(image: &str) -> String {
++    image.replace(['/', '\\', ':', '$', '*', '?', '"', '<', '>', '|'], "_")
++}
++
++fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
++    let Ok(file) = std::fs::File::create(path) else { return };
++    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
++    encoder.set_color(png::ColorType::Rgba);
++    encoder.set_depth(png::BitDepth::Eight);
++    if let Ok(mut writer) = encoder.write_header() {
++        let _ = writer.write_image_data(rgba);
++    }
++}
++
++/// The player's own painting of `image`, if there is one of the right size (RGBA or RGB, 8 bit).
++fn read_png(path: &Path, width: u32, height: u32) -> Option<Vec<u8>> {
++    let file = std::fs::File::open(path).ok()?;
++    let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
++    decoder.set_transformations(png::Transformations::normalize_to_color8());
++    let mut reader = decoder.read_info().ok()?;
++    let mut buffer = vec![0; reader.output_buffer_size()?];
++    let info = reader.next_frame(&mut buffer).ok()?;
++    if info.width != width || info.height != height {
++        diag::warn!(
++            World,
++            "RE4 Leon style: {} is {}x{}, MW2's image is {width}x{height}: not used",
++            path.display(),
++            info.width,
++            info.height
++        );
++        return None;
++    }
++    let pixels = &buffer[..info.buffer_size()];
++    match info.color_type {
++        png::ColorType::Rgba => Some(pixels.to_vec()),
++        png::ColorType::Rgb => Some(pixels.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect()),
++        png::ColorType::GrayscaleAlpha => Some(pixels.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect()),
++        png::ColorType::Grayscale => Some(pixels.iter().flat_map(|&g| [g, g, g, 255]).collect()),
++        _ => None,
++    }
++}
++
++/// Repaint (and/or dump) the arms colour maps among `images`, indexed like the catalog's image bindings.
++/// `variants`/`common` are cleared for repainted slots so no shared copy of MW2's original is reused.
++pub(crate) fn repaint(
++    scene: &WorldScene,
++    fpv: &assets::PreparedFpvMeshes,
++    images: &mut [Option<Arc<Image>>],
++    variants: &mut [Option<asset_material::ImageVariantId>],
++    common: &mut [bool],
++) {
++    let dump_to = std::env::var_os("IW4L_DUMP_FPV").map(std::path::PathBuf::from);
++    let own = std::env::var_os("IW4L_RE4_LEON_PAINT").map(std::path::PathBuf::from);
++    let enabled = style::enabled();
++    if dump_to.is_none() && !enabled {
++        return;
++    }
++    if let Some(folder) = dump_to.as_deref() {
++        let _ = std::fs::create_dir_all(folder);
++    }
++    let uses = arms_material_uses(fpv);
++    let mut done = Vec::new();
++    for material in &scene.runtime_material_catalog.parts().materials {
++        let Some(users) = uses.get(&(material.asset_id.0 as usize)) else { continue };
++        for (_, texture) in material.textures.iter() {
++            let Some(binding) = texture else { continue };
++            let color = binding.semantic == asset_material::TS_COLOR_MAP;
++            if !color && binding.semantic != asset_material::TS_NORMAL_MAP {
++                continue;
++            }
++            let slot = binding.image.0 as usize;
++            let Some(Some(image)) = images.get(slot) else { continue };
++            let name = scene.exact_material_names.get(slot).cloned().unwrap_or_else(|| format!("slot{slot}"));
++            let file = file_name(&name);
++            let (width, height, mut rgba) = match asset_material::decoded_image_top_level_rgba8(image) {
++                Ok(decoded) => decoded,
++                Err(error) => {
++                    diag::warn!(World, "RE4 Leon style: `{name}` ({}) not readable: {error}", material.name);
++                    continue;
++                }
++            };
++            // labels from every arms model that uses this image (first one decides the look)
++            let mut labels = vec![style::LABEL_NONE; (width * height) as usize];
++            let look = users[0].2;
++            let glove = material.name.to_ascii_lowercase().contains("glove");
++            for (mesh, surfaces, _) in users {
++                let Some(entry) = fpv.0.get_at(*mesh) else { continue };
++                let more = style::uv_labels(&entry.skel, surfaces, width, height);
++                for (dst, src) in labels.iter_mut().zip(more) {
++                    if *dst == style::LABEL_NONE {
++                        *dst = src;
++                    }
++                }
++            }
++            if !color {
++                if !enabled {
++                    continue;
++                }
++                style::smooth_normals(look, glove, &labels, width, height, &mut rgba);
++            } else if let Some(folder) = dump_to.as_deref() {
++                write_png(&folder.join(format!("{file}.png")), width, height, &rgba);
++                let shown: Vec<u8> = labels
++                    .iter()
++                    .flat_map(|&l| match l {
++                        style::LABEL_ARM => [200, 120, 60, 255],
++                        style::LABEL_HAND => [60, 60, 220, 255],
++                        style::LABEL_FINGERTIP => [230, 200, 60, 255],
++                        style::LABEL_UPPER => [90, 200, 110, 255],
++                        _ => [0, 0, 0, 255],
++                    })
++                    .collect();
++                write_png(&folder.join(format!("{file}_labels.png")), width, height, &shown);
++            }
++            if !enabled {
++                continue;
++            }
++            let painted_by_player = own
++                .as_deref()
++                .filter(|_| color)
++                .and_then(|folder| read_png(&folder.join(format!("{file}.png")), width, height));
++            let source = if !color {
++                "normals smoothed"
++            } else if let Some(pixels) = painted_by_player {
++                rgba = pixels;
++                "player's own"
++            } else {
++                style::paint(look, glove, &name, &labels, width, height, &mut rgba);
++                "automatic"
++            };
++            if let (true, Some(folder)) = (color, dump_to.as_deref()) {
++                write_png(&folder.join(format!("{file}_leon.png")), width, height, &rgba);
++            }
++            let srgb = image.texture_descriptor.format.is_srgb();
++            let mut repainted = (**image).clone();
++            let (data, levels) = with_mips(width, height, rgba);
++            repainted.texture_descriptor.format =
++                if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
++            repainted.texture_descriptor.size = Extent3d { width, height, depth_or_array_layers: 1 };
++            repainted.texture_descriptor.mip_level_count = levels;
++            repainted.data = Some(data);
++            images[slot] = Some(Arc::new(repainted));
++            if let Some(variant) = variants.get_mut(slot) {
++                *variant = None;
++            }
++            if let Some(flag) = common.get_mut(slot) {
++                *flag = false;
++            }
++            done.push(format!("{name} ({}, {look:?}, {source})", material.name));
++        }
++    }
++    if enabled {
++        diag::info!(World, "RE4 Leon style: repainted {} arms images: {}", done.len(), done.join(", "));
++    }
++}
++
++/// Top level plus a box-filtered mip chain, as one buffer (mip 0 first).
++fn with_mips(width: u32, height: u32, top: Vec<u8>) -> (Vec<u8>, u32) {
++    let mut data = top.clone();
++    let (mut w, mut h, mut level) = (width as usize, height as usize, top);
++    let mut levels = 1;
++    while w > 1 || h > 1 {
++        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
++        let mut next = vec![0u8; nw * nh * 4];
++        for y in 0..nh {
++            for x in 0..nw {
++                for c in 0..4 {
++                    let mut sum = 0u32;
++                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
++                        let sx = (x * 2 + dx).min(w - 1);
++                        let sy = (y * 2 + dy).min(h - 1);
++                        sum += u32::from(level[(sy * w + sx) * 4 + c]);
++                    }
++                    next[(y * nw + x) * 4 + c] = (sum / 4) as u8;
++                }
++            }
++        }
++        data.extend_from_slice(&next);
++        (w, h, level) = (nw, nh, next);
++        levels += 1;
++    }
++    (data, levels)
++}
+diff --git a/crates/render_frontend/src/prepare/scene/world_images.rs b/crates/render_frontend/src/prepare/scene/world_images.rs
+index ef13042..ef8d15b 100644
+--- a/crates/render_frontend/src/prepare/scene/world_images.rs
++++ b/crates/render_frontend/src/prepare/scene/world_images.rs
+@@ -340,6 +340,16 @@ impl WorldImageUpload {
+                 self.release_host_world_images(scene, fpv);
+             }
+         }
++        // MW2-RE4: Leon-style arms, painted before any slot is handed over
++        if let Some(fpv) = fpv {
++            super::re4_leon_style::repaint(
++                scene,
++                fpv,
++                &mut self.exact_images,
++                &mut self.exact_variants,
++                &mut self.exact_common,
++            );
++        }
+         self.exact_by_variant.clear();
+         self.exact_by_image.clear();
+         self.reused_handles = 0;
 diff --git a/crates/sim/src/carrier.rs b/crates/sim/src/carrier.rs
 index 0629207..10f4cd9 100644
 --- a/crates/sim/src/carrier.rs
