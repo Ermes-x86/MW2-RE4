@@ -21,7 +21,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v34 (Leon-style arms)";
+constexpr const char* kVersion = "MW2RE4 v34 (Leon-style arms, jacket)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -211,7 +211,8 @@ constexpr int kResolutionCount = sizeof(kResolutions) / sizeof(kResolutions[0]);
 // loads (only its weapons and soldiers are used; RE4 supplies the world). Takes effect when MW2 starts.
 // Leon: mp_subbase's two kits stand for Leon's two looks in RE4 (thick arctic arms = leather jacket, slim SEAL
 // wetsuit arms = short sleeves and bare forearms), repainted by the runtime from the player's own MW2 images
-// (IW4L_RE4_LEON_STYLE); which one shows follows RE4 (LeonLook).
+// (IW4L_RE4_LEON_STYLE). The runtime shows the jacket all game for now (re4_leon_style::BARE_LOOK); LeonLook is
+// still reported.
 struct Skin { const char* name; const char* map; bool leon; };
 const Skin kSkins[] = {
     { "Task Force 141 (desert)", "mp_rust", false },
@@ -219,7 +220,7 @@ const Skin kSkins[] = {
     { "Task Force 141 (snow)", "mp_derail", false },
     { "US Army Rangers", "mp_invasion", false },
     { "Navy SEALs", "mp_subbase", false },
-    { "Leon (follows RE4)", "mp_subbase", true },
+    { "Leon (jacket)", "mp_subbase", true },
 };
 constexpr int kSkinCount = sizeof(kSkins) / sizeof(kSkins[0]);
 
