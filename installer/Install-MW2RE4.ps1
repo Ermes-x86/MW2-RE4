@@ -297,4 +297,4 @@ Say ''
 Say 'How to play:' Cyan
 Say '  Start Resident Evil 4, load your game, then press F6. The first start'
 Say '  prepares MW2 assets and can take about a minute.'
-Say '  F6 on/off  F7 controls  F10 settings  F11 gun damage  F5 gun list  1 next gun  E use  U UAV'
+Say '  F6 on/off  F7 controls  F10 settings  F11 gun damage  F5 gun list  1 next gun  E use'

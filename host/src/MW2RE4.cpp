@@ -22,7 +22,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v36 (F8 gun picker)";
+constexpr const char* kVersion = "MW2RE4 v37 (incendiary pick, no UAV)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -192,12 +192,12 @@ struct Settings
     int showGunList = 0;       // F5: RE4 -> MW2 gun list in the attache case and the merchant
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
     int grenadeTrace = 0; // research: log RE4's own effect / sound / blast calls while MW2 is off
+    int incendiary = 0;   // MW2's frag (G) throws RE4's incendiary grenades instead of hand grenades (F8)
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
     // Damage multiplier per MW2 gun class (F11), applied to the damage RE4 computes for the class's RE4 gun
     float damage[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
     int re4Inventory = 1;      // MW2's gun and ammo come from Leon's attache case (0 = MW2's own, F8 menu)
-    int uavSeconds = 30, uavCooldown = 60;
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
     int resolution = 2;        // index into kResolutions: the size MW2 renders at
@@ -260,10 +260,9 @@ void LoadSettings()
     g_cfg.showGunList = GetPrivateProfileIntA("MW2RE4", "ShowGunList", g_cfg.showGunList, path);
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
     g_cfg.grenadeTrace = GetPrivateProfileIntA("MW2RE4", "GrenadeTrace", g_cfg.grenadeTrace, path);
+    g_cfg.incendiary = GetPrivateProfileIntA("MW2RE4", "Incendiary", g_cfg.incendiary, path) != 0;
     g_cfg.promptRaise = IniFloat(path, "PromptRaise", g_cfg.promptRaise);
     g_cfg.messageRaise = IniFloat(path, "MessageRaise", g_cfg.messageRaise);
-    g_cfg.uavSeconds = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavSeconds", g_cfg.uavSeconds, path), 5, 600);
-    g_cfg.uavCooldown = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "UavCooldown", g_cfg.uavCooldown, path), 0, 600);
     for (int i = 0; i < 6; ++i)
     {
         char key[16];
@@ -501,9 +500,10 @@ bool MenuOpen() { return g_weaponMenu || g_settingsMenu || g_damageMenu; }
 size_t g_selected = 0;
 std::vector<size_t> g_pickList; // Re4Inventory=1: the g_catalog guns the F8 picker offers
 bool PickerStart();
-void PickerApply(const char* mw2);
+void PickerApply(size_t entry);
 std::string PickerTitle();
-bool PickerCurrent(const char* mw2);
+std::string PickerName(size_t entry);
+bool PickerIsCurrent(size_t entry);
 uint32_t g_request = 0, g_requestKind = 0, g_requestWeapon = 0;
 int32_t g_requestClip = 0, g_requestStock = 0, g_requestSize = 0;
 DWORD g_requestTime = 0;
@@ -1171,7 +1171,10 @@ int EnemiesNear(uint8_t* pl, const Vec3& c, float radius, uint8_t** out, int max
     return n;
 }
 
-int RE4Explosion(Vec3 pos, bool flash)
+// weaponNo: RE4 weapon number the blast hits with (-1 = hand / flash grenade); the incendiary's makes enemies burn.
+int IncendiaryWeaponNo();
+
+int RE4Explosion(Vec3 pos, bool flash, int weaponNo = -1)
 {
     uint8_t* g = Global();
     __try
@@ -1188,7 +1191,8 @@ int RE4Explosion(Vec3 pos, bool flash)
             Vec3 p = pos;
             if (flash)
                 p.y += 500.f;
-            hits = g_bulletHit(nullptr, &p, &p, flash ? re4::WEP_FLASH : re4::WEP_GRENADE, 0, flash ? 15000.f : 6000.f);
+            int weapon = weaponNo >= 0 ? weaponNo : flash ? re4::WEP_FLASH : re4::WEP_GRENADE;
+            hits = g_bulletHit(nullptr, &p, &p, weapon, 0, flash ? 15000.f : 6000.f);
         }
         if (g)
             At<uint32_t>(g, re4::G_statusFlags + 4) |= re4::STA1_EXPLOSION;
@@ -1289,76 +1293,17 @@ void ResolveShots(uint8_t* pl)
         // then the attack-hit routine in blast mode (no attacker, start == end, radius).
         Vec3 c = ToRe4(e.origin);
         g_hitScaleUntil = 0; // RE4's own grenade damage
-        int hits = RE4Explosion(c, flash);
+        // MW2's frag stands for RE4's incendiary when the F8 picker chose it: hit with its weapon number
+        int fire = !flash && g_cfg.incendiary && strstr(name, "frag") ? IncendiaryWeaponNo() : -1;
+        int hits = RE4Explosion(c, flash, fire);
         ++g_blastsSent;
-        Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s, BulletHit returned %d", e.sequence,
-            name[0] ? name : "?", e.kind, e.radius, flash ? "flash grenade" : "hand grenade", hits);
+        Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s (weapon 0x%02X), BulletHit returned %d", e.sequence,
+            name[0] ? name : "?", e.kind, e.radius, flash ? "flash grenade" : fire >= 0 ? "incendiary" : "hand grenade",
+            fire >= 0 ? fire : flash ? re4::WEP_FLASH : re4::WEP_GRENADE, hits);
     }
 }
 
-// ---------------------------------------------------------------- UAV
-// MW2's own UAV only reveals MW2 players, so this one reads RE4's enemy list: U calls it in, a radar
-// (top right) shows every live enemy around Leon for UavSeconds, then it needs UavCooldown to come back.
 void Notice(const std::string& text, DWORD ms);
-DWORD g_uavUntil = 0, g_uavReadyAt = 0;
-struct RadarDot { float right, forward; };
-std::vector<RadarDot> g_radarDots;
-
-void UavInput(bool focused)
-{
-    static bool was = false;
-    bool down = focused && g_active && !MenuOpen() && Down('U');
-    DWORD now = GetTickCount();
-    if (down && !was)
-    {
-        if (now < g_uavUntil)
-            ;
-        else if (now < g_uavReadyAt)
-        {
-            char t[64];
-            snprintf(t, sizeof(t), "UAV ready in %lu s", (g_uavReadyAt - now + 999) / 1000);
-            Notice(t, 1500);
-        }
-        else
-        {
-            g_uavUntil = now + g_cfg.uavSeconds * 1000;
-            g_uavReadyAt = g_uavUntil + g_cfg.uavCooldown * 1000;
-            Notice("UAV online", 2000);
-            Log("UAV called in for %d s", g_cfg.uavSeconds);
-        }
-    }
-    was = down;
-}
-
-void UpdateRadar(uint8_t* pl)
-{
-    g_radarDots.clear();
-    if (!g_emMgr || !pl || GetTickCount() >= g_uavUntil)
-        return;
-    __try
-    {
-        const Vec3 lp = At<Vec3>(pl, re4::Coord_pos);
-        float t = At<Vec3>(pl, re4::Coord_ang).y; // Leon faces (sin t, cos t) in x/z
-        float st = std::sin(t), ct = std::cos(t);
-        uint8_t* array = At<uint8_t*>(g_emMgr, re4::Mgr_array);
-        uint32_t count = At<uint32_t>(g_emMgr, re4::Mgr_count), stride = At<uint32_t>(g_emMgr, re4::Mgr_stride);
-        for (uint32_t i = 0; array && i < count && i < 512; ++i)
-        {
-            uint8_t* em = array + i * stride;
-            if (em == pl || (At<uint32_t>(em, re4::Unit_beFlag) & 0x601) == 0 || At<int16_t>(em, re4::Em_hp) <= 0)
-                continue;
-            const Vec3 p = At<Vec3>(em, re4::Coord_pos);
-            float dx = (p.x - lp.x) / 1000.f, dz = (p.z - lp.z) / 1000.f;
-            float fwd = dx * st + dz * ct, right = -dx * ct + dz * st;
-            if (fwd * fwd + right * right < 50.f * 50.f)
-                g_radarDots.push_back({ right, fwd });
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        g_radarDots.clear();
-    }
-}
 
 // ---------------------------------------------------------------- RE4 captions
 // Captions ("Will you use the emblem?", item messages) are placed by MesSet. While MW2 has control the
@@ -1750,7 +1695,7 @@ void WeaponMenuInput(bool focused)
         if (enter)
         {
             if (g_cfg.re4Inventory)
-                PickerApply(g_catalog[g_pickList[g_selected]].name);
+                PickerApply(g_pickList[g_selected]);
             else
                 Request(1, g_catalog[g_selected].weapon);
             g_weaponMenu = false;
@@ -1774,19 +1719,18 @@ std::string WeaponMenuText()
     size_t first = g_selected / 12 * 12;
     for (size_t i = first; i < std::min(first + 12, n); ++i)
     {
-        const char* raw = g_catalog[pick ? g_pickList[i] : i].name;
+        std::string name = pick ? PickerName(g_pickList[i]) : std::string(g_catalog[i].name);
         t += i == g_selected ? "> " : "   ";
-        std::string name = raw;
         for (auto& c : name)
             c = (char)toupper((unsigned char)c);
         t += name;
-        if (pick && PickerCurrent(raw))
+        if (pick && PickerIsCurrent(g_pickList[i]))
             t += "   (now)";
         t += "\n";
     }
     char page[64];
     snprintf(page, sizeof(page), "\npage %zu / %zu   (%zu %s)", first / 12 + 1, (n + 11) / 12, n,
-             pick ? "guns" : "weapons");
+             pick ? "choices" : "weapons");
     return t + page;
 }
 
@@ -1844,6 +1788,19 @@ ItemArmFn g_itemArm = nullptr;
 ItemEraseFn g_itemErase = nullptr;
 ChargeNumFn g_chargeNum = nullptr;
 WeaponNoFn g_weaponNo = nullptr;
+
+// RE4's weapon number for its incendiary grenade (from WeaponId2WeaponNo); the hand grenade's if unknown.
+int IncendiaryWeaponNo()
+{
+    int no = g_weaponNo ? g_weaponNo(re4::ITEM_FLAME_GRENADE) : 0;
+    static int logged = -1;
+    if (no != logged)
+    {
+        Log("incendiary grenade: RE4 weapon number 0x%02X", no);
+        logged = no;
+    }
+    return no ? no : re4::WEP_GRENADE;
+}
 WeaponChangeFn g_weaponChange = nullptr;
 SpecialTunedFn g_specialTuned = nullptr;
 bool ArsenalReady()
@@ -1998,14 +1955,39 @@ struct Arsenal
     bool remap = false;         // the F8 picker changed the MW2 gun for the equipped RE4 gun: arm it again
 } g_arm;
 
-bool PickerCurrent(const char* mw2) { return g_arm.gun >= 0 && g_gunMw2[g_arm.gun] == mw2; }
+// Picker entries: a g_catalog index (an MW2 gun for the equipped RE4 gun) or one of the two grenade rows, which
+// choose what MW2's frag (G) throws: RE4's hand grenades or its incendiary grenades.
+constexpr size_t kPickHandGrenade = SIZE_MAX, kPickIncendiary = SIZE_MAX - 1;
+
+bool PickerIsCurrent(size_t entry)
+{
+    if (entry == kPickHandGrenade)
+        return !g_cfg.incendiary;
+    if (entry == kPickIncendiary)
+        return g_cfg.incendiary != 0;
+    return g_arm.gun >= 0 && entry < g_catalog.size() && g_gunMw2[g_arm.gun] == g_catalog[entry].name;
+}
+
+std::string PickerName(size_t entry)
+{
+    char line[96];
+    if (entry == kPickHandGrenade || entry == kPickIncendiary)
+    {
+        bool fire = entry == kPickIncendiary;
+        snprintf(line, sizeof(line), "G grenade: %s (%d in the case)", fire ? "incendiary" : "hand grenade",
+                 CountItem(fire ? re4::ITEM_FLAME_GRENADE : re4::ITEM_GRENADE));
+        return line;
+    }
+    return entry < g_catalog.size() ? g_catalog[entry].name : "?";
+}
 
 std::string PickerTitle()
 {
-    return g_arm.gun >= 0 ? "MW2 GUN FOR: " + Upper(kGuns[g_arm.gun].label) : "MW2 GUN";
+    return g_arm.gun >= 0 && g_arm.item ? "MW2 GUN FOR: " + Upper(kGuns[g_arm.gun].label) : "GRENADE (G)";
 }
 
-// F8 with Re4Inventory=1: list MW2's guns (no grenades or equipment) for the RE4 gun Leon has equipped.
+// F8 with Re4Inventory=1: the two grenade rows, then MW2's guns (no grenades or equipment) for the RE4 gun Leon
+// has equipped (guns only when one is equipped).
 bool PickerStart()
 {
     if (g_catalog.empty())
@@ -2013,14 +1995,14 @@ bool PickerStart()
         Notice("MW2 weapon list not received yet");
         return false;
     }
+    g_pickList.assign({ kPickHandGrenade, kPickIncendiary });
+    g_selected = g_cfg.incendiary ? 1 : 0;
     if (!g_arm.item || g_arm.gun < 0)
     {
-        Notice("Equip an RE4 gun first (not the knife or a grenade)");
-        return false;
+        Notice("Equip an RE4 gun to pick its MW2 gun", 2500);
+        return true;
     }
     static const char* notGuns[] = { "grenade", "smoke", "flash", "concussion", "semtex", "stun" };
-    g_pickList.clear();
-    g_selected = 0;
     for (size_t i = 0; i < g_catalog.size(); ++i)
     {
         const char* name = g_catalog[i].name;
@@ -2029,24 +2011,34 @@ bool PickerStart()
             skip = skip || strstr(name, x);
         if (skip)
             continue;
-        if (PickerCurrent(name))
+        if (PickerIsCurrent(i))
             g_selected = g_pickList.size();
         g_pickList.push_back(i);
     }
-    return !g_pickList.empty();
+    return true;
 }
 
-// The picked MW2 gun now stands for the equipped RE4 gun (and its other versions), saved to [Guns].
-void PickerApply(const char* mw2)
+// A grenade row sets what G throws (saved as Incendiary= in the INI); a gun row makes that MW2 gun stand for the
+// equipped RE4 gun (and its other versions), saved to [Guns].
+void PickerApply(size_t entry)
 {
-    if (g_arm.gun < 0)
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    if (entry == kPickHandGrenade || entry == kPickIncendiary)
+    {
+        g_cfg.incendiary = entry == kPickIncendiary;
+        WritePrivateProfileStringA("MW2RE4", "Incendiary", g_cfg.incendiary ? "1" : "0", path);
+        Notice(g_cfg.incendiary ? "G throws incendiary grenades" : "G throws hand grenades", 2500);
+        Log("picker: G grenade = %s", g_cfg.incendiary ? "incendiary" : "hand grenade");
         return;
+    }
+    if (g_arm.gun < 0 || entry >= g_catalog.size())
+        return;
+    const char* mw2 = g_catalog[entry].name;
     const char* key = kGuns[g_arm.gun].key;
     for (int i = 0; i < kGunCount; ++i)
         if (!strcmp(kGuns[i].key, key))
             g_gunMw2[i] = mw2;
-    char path[MAX_PATH];
-    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
     WritePrivateProfileStringA("Guns", key, mw2, path);
     g_arm.remap = true;
     g_arm.missing.clear();
@@ -2345,16 +2337,17 @@ void ArsenalUpdate(bool focused)
     }
 
     // 3. Grenades.
+    // MW2's frag is the grenade type chosen in the F8 picker (hand grenades or incendiaries)
+    const uint16_t fragItem = g_cfg.incendiary ? re4::ITEM_FLAME_GRENADE : re4::ITEM_GRENADE;
     uint32_t fragWeapon = CatalogWeapon("frag grenade"), flashWeapon = CatalogWeapon("flash grenade");
-    int grenades = CountItem(re4::ITEM_GRENADE) + CountItem(re4::ITEM_FLAME_GRENADE);
+    int grenades = CountItem(fragItem);
     int flashes = CountItem(re4::ITEM_FLASH_GRENADE);
     if (fragWeapon)
     {
         if (g_arm.frag > 0 && g_features.lethalAmmo < g_arm.frag)
         {
             int thrown = g_arm.frag - std::max(0, g_features.lethalAmmo);
-            int t = TakeItem(re4::ITEM_GRENADE, thrown);
-            TakeItem(re4::ITEM_FLAME_GRENADE, thrown - t);
+            TakeItem(fragItem, thrown);
             grenades = std::max(0, grenades - thrown);
             g_arm.frag = std::max(0, g_features.lethalAmmo);
         }
@@ -2929,8 +2922,6 @@ void __cdecl CameraSetHook(uint8_t* camera)
     }
     g_helpKeyWasDown = helpKey;
     WeaponMenuInput(focused);
-    UavInput(focused);
-    UpdateRadar(pl);
     if (!g_active)
         UpdateTrace(pl);
 
@@ -3184,7 +3175,6 @@ const char* kHelp =
     "F8  pick the MW2 gun for the equipped RE4 gun\n"
     "F10  settings: FOV, mouse, ammo, skin, resolution\n"
     "F11  gun damage\n"
-    "U  UAV radar (shows Ganados)\n"
     "RE4 inventory, map and menu keys work\n"
     "F6  MW2 on / off";
 
@@ -3425,23 +3415,6 @@ void DrawOverlay(IDirect3DDevice9* device)
                 Quad(device, bx + 1, by - g_hpText.height - 2.f, (float)g_hpText.width, (float)g_hpText.height, 0xff000000, g_hpText.texture);
                 Quad(device, bx, by - g_hpText.height - 3.f, (float)g_hpText.width, (float)g_hpText.height, 0xffffffff, g_hpText.texture);
             }
-        }
-        if (drawMw2 && GetTickCount() < g_uavUntil)
-        {
-            // UAV radar: Leon at the centre facing up, 50 m to the edge, enemies as red dots
-            float size = h * .26f, x0 = w - size - h * .03f, y0 = h * .03f, cx = x0 + size / 2, cy = y0 + size / 2;
-            device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
-            device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
-            Quad(device, x0 - 2, y0 - 2, size + 4, size + 4, 0xd0000000);
-            Quad(device, x0, y0, size, size, 0xa0203020);
-            Quad(device, cx - .5f, y0, 1, size, 0x6080ff80);
-            Quad(device, x0, cy - .5f, size, 1, 0x6080ff80);
-            float sweep = (GetTickCount() % 2000) / 2000.f;
-            Quad(device, x0, y0 + size * sweep, size, 2, 0x5080ff80);
-            float scale = size / 2 / 50.f, d = std::max(4.f, h * .008f);
-            for (auto& dot : g_radarDots)
-                Quad(device, cx + dot.right * scale - d / 2, cy - dot.forward * scale - d / 2, d, d, 0xffff3030);
-            Quad(device, cx - d / 2, cy - d / 2, d, d, 0xffffff60);
         }
         if (drawMw2 && g_damageMenu && UpdateText(device, g_damageText, DamageText(), (int)(textPx * 1.05f)))
             DrawPanel(device, g_damageText, (w - g_damageText.width) / 2, h * .12f, 0xfff0f0f0);
