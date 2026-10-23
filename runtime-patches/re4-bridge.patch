@@ -57,10 +57,10 @@ index 3bc033f..05d474d 100644
  
 diff --git a/crates/asset_model/src/re4_leon_style.rs b/crates/asset_model/src/re4_leon_style.rs
 new file mode 100644
-index 0000000..5419d80
+index 0000000..6f638eb
 --- /dev/null
 +++ b/crates/asset_model/src/re4_leon_style.rs
-@@ -0,0 +1,453 @@
+@@ -0,0 +1,504 @@
 +//! MW2-RE4: Leon-style first-person arms (shared state and the paint recipe).
 +//!
 +//! With `IW4L_RE4_LEON_STYLE` set (the host loads mp_subbase), the map's two arms models stand for Leon's two
@@ -452,31 +452,78 @@ index 0000000..5419d80
 +
 +/// Local painted-jacket finish. Operates at load time; the player's PNGs remain intact.
 +/// Neutral black gloves, warmer leather, and restrained grain; preserve skin and alpha.
++/// `tone` (luminance) in the hue of `hue`: the colour whose luminance is `tone`.
++fn toned(hue: [f32; 3], tone: f32) -> [f32; 3] {
++    let l = 0.2126 * hue[0] + 0.7152 * hue[1] + 0.0722 * hue[2];
++    hue.map(|c| c * tone / l)
++}
++
++/// Pebbled leather (Leon's jacket in RE4): cells about `cell` texels wide, each slightly domed, with dark creases
++/// between them. A brightness factor around 1.
++fn pebbles(x: f32, y: f32, cell: f32, seed: u32) -> f32 {
++    let (gx, gy) = (x / cell, y / cell);
++    let (cx, cy) = (gx.floor() as i64, gy.floor() as i64);
++    let (mut f1, mut f2) = (9.0f32, 9.0f32);
++    for j in -1..=1 {
++        for i in -1..=1 {
++            let (px, py) = ((cx + i) as f32 + hash(cx + i, cy + j, seed), (cy + j) as f32 + hash(cx + i, cy + j, seed + 1));
++            let d = ((px - gx).powi(2) + (py - gy).powi(2)).sqrt();
++            if d < f1 {
++                f2 = f1;
++                f1 = d;
++            } else if d < f2 {
++                f2 = d;
++            }
++        }
++    }
++    let crease = ((f2 - f1) / 0.18).clamp(0.0, 1.0); // 0 on the crease between two pebbles
++    let dome = 1.0 - 0.07 * (f1 / 0.7).clamp(0.0, 1.0);
++    dome * (0.88 + 0.12 * crease)
++}
++
++/// Leon's colours from the user's RE4 screenshot, at load time (the player's PNGs stay as they are):
++/// - jacket: olive-brown pebbled leather, reddish-brown piping, cream fur (MW2's seams and folds kept);
++/// - gloves (MW2's own glove texture): black leather with an olive sheen, bare skin past the first finger joint.
 +pub fn finish_painted(look: Look, glove: bool, labels: &[u8], width: u32, height: u32, rgba: &mut [u8]) {
 +    let (w, h) = (width as usize, height as usize);
 +    if labels.len() != w * h || rgba.len() != w * h * 4 { return; }
++    const LEATHER: [f32; 3] = [1.22, 1.0, 0.74];
++    const PIPING: [f32; 3] = [1.55, 0.95, 0.62];
++    const FUR: [f32; 3] = [1.18, 1.0, 0.66];
++    const GLOVE: [f32; 3] = [0.98, 1.0, 0.86];
++    const SKIN: [f32; 3] = [1.30, 1.0, 0.74];
 +    for i in 0..w * h {
 +        let label = labels[i];
++        if label == LABEL_NONE { continue; }
 +        let p = &mut rgba[i * 4..i * 4 + 4];
-+        if label == LABEL_FINGERTIP || label == LABEL_NONE { continue; }
-+        if glove {
-+            // Cap the albedo rather than multiplying repeatedly: truly black, with detail.
-+            let l = 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
-+            let black = (3.0 + l * 0.30).clamp(3.0, 12.0).round() as u8;
-+            p[..3].fill(black);
-+        } else if look == Look::Jacket && matches!(label, LABEL_ARM | LABEL_UPPER) {
-+            // Preserve light shearling and seams. Remove the old olive cast from leather.
-+            let l = 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
-+            if l < 112.0 {
-+                let x = (i % w) as f32 * 1024.0 / width as f32;
-+                let y = (i / w) as f32 * 1024.0 / height as f32;
-+                let grain = (value_noise(x / 1.7, y / 1.7, 53) - 0.5) * 1.8;
-+                let tone = 60.0 + (l - 63.0) * 0.72;
-+                // a warm red-brown (the user's "more brown"); MW2's lighting greys it a little
-+                for (c, ratio) in [1.42, 0.88, 0.46].iter().enumerate() {
-+                    p[c] = (tone * ratio + grain).round().clamp(0.0, 255.0) as u8;
-+                }
++        let l = 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
++        let x = (i % w) as f32 * 1024.0 / width as f32;
++        let y = (i / w) as f32 * 1024.0 / height as f32;
++        let out = if glove {
++            if label == LABEL_FINGERTIP {
++                // skin, with MW2's glove detail as soft shading (its fingertips average about 44)
++                let detail = (l / 44.0).clamp(0.7, 1.3);
++                toned(SKIN, 82.0 * (0.85 + 0.15 * detail) * (0.96 + 0.08 * value_noise(x / 6.0, y / 6.0, 71)))
++            } else {
++                // MW2's stitching and padding stay visible, a little lighter than pitch black
++                toned(GLOVE, (19.0 + (l - 42.0) * 0.40).clamp(8.0, 40.0))
 +            }
++        } else if look == Look::Jacket && matches!(label, LABEL_ARM | LABEL_UPPER) {
++            let reddish = p[0] as f32 > p[1] as f32 * 1.3 && p[0] as f32 - p[2] as f32 > 40.0;
++            if l >= 112.0 {
++                // fur cuff / collar: cream, with soft tufts
++                toned(FUR, (l * 0.78) * (0.93 + 0.14 * value_noise(x / 2.5, y / 2.5, 61)))
++            } else if reddish {
++                toned(PIPING, 48.0 + (l - 60.0) * 0.5)
++            } else {
++                let mottle = 0.95 + 0.10 * clouds(x, y, 90.0, 57);
++                toned(LEATHER, (54.0 + (l - 63.0) * 0.6) * mottle * pebbles(x, y, 3.8, 59))
++            }
++        } else {
++            continue;
++        };
++        for c in 0..3 {
++            p[c] = out[c].round().clamp(0.0, 255.0) as u8;
 +        }
 +    }
 +}
@@ -506,12 +553,16 @@ index 0000000..5419d80
 +    }
 +}
 +
++/// Gloves: leather with a soft sheen like Leon's; the bare fingertips barely shine.
 +pub fn glove_specular(glove: bool, labels: &[u8], rgba: &mut [u8]) {
 +    if !glove || rgba.len() != labels.len() * 4 { return; }
 +    for (pixel, &label) in rgba.chunks_exact_mut(4).zip(labels) {
-+        if label != LABEL_NONE && label != LABEL_FINGERTIP {
-+            for c in &mut pixel[..3] { *c = (f32::from(*c) * 0.25).round() as u8; }
-+        }
++        let k = match label {
++            LABEL_NONE => continue,
++            LABEL_FINGERTIP => 0.25,
++            _ => 0.65,
++        };
++        for c in &mut pixel[..3] { *c = (f32::from(*c) * k).round() as u8; }
 +    }
 +}
 diff --git a/crates/bootstrap/Cargo.toml b/crates/bootstrap/Cargo.toml
@@ -972,10 +1023,10 @@ index 4070734..e3a1e50 100644
  pub mod model_lighting_cache;
 diff --git a/crates/render_frontend/src/prepare/scene/re4_leon_style.rs b/crates/render_frontend/src/prepare/scene/re4_leon_style.rs
 new file mode 100644
-index 0000000..d3ebbd6
+index 0000000..5125c10
 --- /dev/null
 +++ b/crates/render_frontend/src/prepare/scene/re4_leon_style.rs
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,241 @@
 +//! MW2-RE4: Leon-style first-person arms. MW2's own arms models are kept (their fit and animation are MW2's);
 +//! only their colour maps are repainted from the player's own MW2 images while the map's images are handed to
 +//! the GPU (`asset_model::re4_leon_style`: the jacket arms get Leon's brown leather, the bare arms his short
@@ -1109,11 +1160,6 @@ index 0000000..d3ebbd6
 +            let mut labels = vec![style::LABEL_NONE; (width * height) as usize];
 +            let look = users[0].2;
 +            let glove = material.name.to_ascii_lowercase().contains("glove");
-+            if glove && enabled {
-+                // MW2's own gloves, untouched: dark grey with full fingers and their stitching (the repainted
-+                // near-black glove and skin fingertips did not look right)
-+                continue;
-+            }
 +            for (mesh, surfaces, _) in users {
 +                let Some(entry) = fpv.0.get_at(*mesh) else { continue };
 +                let more = style::uv_labels(&entry.skel, surfaces, width, height);
@@ -1129,6 +1175,7 @@ index 0000000..d3ebbd6
 +                }
 +                if specular {
 +                    style::jacket_specular(look, glove, &labels, &mut rgba);
++                    style::glove_specular(glove, &labels, &mut rgba);
 +                } else {
 +                    style::smooth_normals(look, glove, &labels, width, height, &mut rgba);
 +                    style::soften_jacket_normals(look, glove, &labels, width, height, &mut rgba);
@@ -1152,13 +1199,15 @@ index 0000000..d3ebbd6
 +            }
 +            let painted_by_player = own
 +                .as_deref()
-+                .filter(|_| color)
++                .filter(|_| color && !glove) // gloves: MW2's own glove texture, recoloured below
 +                .and_then(|folder| read_png(&folder.join(format!("{file}.png")), width, height));
 +            let source = if !color {
 +                if specular { "specular softened" } else { "normals smoothed" }
 +            } else if let Some(pixels) = painted_by_player {
 +                rgba = pixels;
 +                "player's own"
++            } else if glove {
++                "MW2's glove in Leon's colours"
 +            } else {
 +                style::paint(look, glove, &name, &labels, width, height, &mut rgba);
 +                "automatic"
