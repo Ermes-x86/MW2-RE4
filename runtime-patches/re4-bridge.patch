@@ -517,10 +517,71 @@ index a8620ac..981e5b3 100644
  assets.workspace = true
  audio.workspace = true
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..f76ccd8 100644
+index 32839dd..d5d262e 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
-@@ -479,9 +479,20 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+@@ -154,6 +154,7 @@ unsafe extern "system" {
+         size: usize,
+     ) -> *mut c_void;
+     fn CreateMutexW(attributes: *const c_void, owner: i32, name: *const u16) -> *mut c_void;
++    fn OpenEventW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
+     fn WaitForSingleObject(handle: *mut c_void, timeout: u32) -> u32;
+     fn ReleaseMutex(handle: *mut c_void) -> i32;
+     fn UnmapViewOfFile(address: *const c_void) -> i32;
+@@ -185,6 +186,8 @@ struct Memory {
+     control: usize,
+     frame: usize,
+     scene: usize,
++    /// MW2-RE4: auto-reset event the host sets once per host frame (0 = none: paced by the timer)
++    tick: usize,
+ }
+ impl Drop for Memory {
+     fn drop(&mut self) {
+@@ -193,6 +196,9 @@ impl Drop for Memory {
+             for handle in [self.mapping, self.control, self.frame, self.scene] {
+                 CloseHandle(handle as *mut c_void);
+             }
++            if self.tick != 0 {
++                CloseHandle(self.tick as *mut c_void);
++            }
+         }
+     }
+ }
+@@ -248,12 +254,15 @@ impl Memory {
+                 }
+                 return None;
+             }
++            // SYNCHRONIZE: only waited on
++            let tick = OpenEventW(0x0010_0000, 0, wide("_tick").as_ptr());
+             Some(Arc::new(Self {
+                 mapping: mapping as usize,
+                 address: address as usize,
+                 control: control as usize,
+                 frame: frame as usize,
+                 scene: scene as usize,
++                tick: tick as usize,
+             }))
+         }
+     }
+@@ -409,8 +418,15 @@ pub fn install(app: &mut App) {
+ }
+ fn pace_runtime(mut bridge: ResMut<Bridge>) {
+     bridge.sleep_timing = [0.0; 2];
+-    if bridge.guest.ready != 0 {
+-        let period = Duration::from_micros(if bridge.host_movement.flags & 1 != 0 {
++    let active = bridge.host_movement.flags & 1 != 0;
++    if bridge.guest.ready != 0 && active && bridge.memory.tick != 0 {
++        // MW2-RE4: one MW2 frame per RE4 frame. The host sets the event when RE4 updates its camera; the
++        // host state read next is that frame's. At most 50 ms, so a paused RE4 never stops MW2.
++        let started = Instant::now();
++        unsafe { WaitForSingleObject(bridge.memory.tick as *mut c_void, 50) };
++        bridge.sleep_timing[1] = started.elapsed().as_secs_f32() * 1000.0;
++    } else if bridge.guest.ready != 0 {
++        let period = Duration::from_micros(if active {
+             16_667
+         } else {
+             66_667
+@@ -479,9 +495,20 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
          }
          bridge.host = unsafe { memory.read(HOST) };
          bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
@@ -542,7 +603,7 @@ index 32839dd..f76ccd8 100644
          bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
      }
      if let Some(_guard) = memory.lock_scene() {
-@@ -681,8 +692,8 @@ fn anchor_authority(
+@@ -681,8 +708,8 @@ fn anchor_authority(
          let origin = ps.origin;
          let released = scene.release_traps(
              ps.origin,
@@ -553,7 +614,7 @@ index 32839dd..f76ccd8 100644
              0x0281_0011,
              &mut bridge.ghosts,
          );
-@@ -772,8 +783,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+@@ -772,8 +799,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
      direction = direction.map(|d| d / length);
      match scene.unblock_lift(
          ps.origin,

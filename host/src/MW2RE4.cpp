@@ -22,7 +22,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v42 (incendiary fire, grenade fallback, RE4 knife, speed upgrades, rides, merchant names)";
+constexpr const char* kVersion = "MW2RE4 v43 (MW2 frames synced to RE4)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -190,7 +190,8 @@ struct Settings
     int invertMouseY = 0;
     int showControls = 1;
     int showGunList = 0;       // F5: RE4 -> MW2 gun list in the attache case and the merchant
-    int shopGunNames = 1;      // the merchant always shows the MW2 name of each RE4 gun (F5 hides it there)
+    int shopGunNames = 1;
+    int syncFrames = 1;        // MW2 draws one frame per RE4 frame (0 = its own 60 fps timer; takes effect at start)      // the merchant always shows the MW2 name of each RE4 gun (F5 hides it there)
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
     int grenadeTrace = 0; // research: log RE4's own effect / sound / blast calls while MW2 is off
     int incendiary = 0;   // MW2's frag (G) throws RE4's incendiary grenades instead of hand grenades (F8)
@@ -260,6 +261,7 @@ void LoadSettings()
     g_cfg.showControls = GetPrivateProfileIntA("MW2RE4", "ShowControls", g_cfg.showControls, path);
     g_cfg.showGunList = GetPrivateProfileIntA("MW2RE4", "ShowGunList", g_cfg.showGunList, path);
     g_cfg.shopGunNames = GetPrivateProfileIntA("MW2RE4", "ShopGunNames", g_cfg.shopGunNames, path);
+    g_cfg.syncFrames = GetPrivateProfileIntA("MW2RE4", "SyncFrames", g_cfg.syncFrames, path);
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
     g_cfg.grenadeTrace = GetPrivateProfileIntA("MW2RE4", "GrenadeTrace", g_cfg.grenadeTrace, path);
     g_cfg.incendiary = GetPrivateProfileIntA("MW2RE4", "Incendiary", g_cfg.incendiary, path) != 0;
@@ -469,6 +471,7 @@ Vec3 DirToRe4(const float h[3]) { return { h[0], h[2], -h[1] }; }
 
 // ---------------------------------------------------------------- bridge state
 HANDLE g_mapping = nullptr, g_controlMutex = nullptr, g_frameMutex = nullptr, g_sceneMutex = nullptr;
+HANDLE g_tickEvent = nullptr; // set once per RE4 frame: MW2 renders a frame for each (SyncFrames)
 uint8_t* g_shared = nullptr;
 PROCESS_INFORMATION g_child{};
 Host g_host{};
@@ -554,6 +557,8 @@ bool CreateBridge()
     g_controlMutex = CreateMutexW(nullptr, FALSE, (name + L"_control").c_str());
     g_frameMutex = CreateMutexW(nullptr, FALSE, (name + L"_frame").c_str());
     g_sceneMutex = CreateMutexW(nullptr, FALSE, (name + L"_scene").c_str());
+    if (g_cfg.syncFrames && !g_tickEvent)
+        g_tickEvent = CreateEventW(nullptr, FALSE, FALSE, (name + L"_tick").c_str()); // auto-reset
     if (!g_shared || !g_controlMutex || !g_frameMutex || !g_sceneMutex)
         return false;
     Lock lock(g_controlMutex);
@@ -3029,6 +3034,8 @@ void __cdecl CameraSetHook(uint8_t* camera)
         Activate(g, pl);
 
     Exchange(g, pl);
+    if (g_tickEvent)
+        SetEvent(g_tickEvent); // MW2's next frame is this RE4 frame's (its view was just written)
     SafeArsenalUpdate(focused);
     g_lastTick = GetTickCount();
     if (g_active && g)
