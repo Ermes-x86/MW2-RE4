@@ -47,6 +47,8 @@ namespace re4
     constexpr size_t G_plCostume   = 0x4FC9; // uint8, Leon: 0 jacket, 1 normal, 2 vest, 3 RPD, 4 mafia
     constexpr size_t G_statusFlags = 0x501C; // Flags_STATUS word 0
     constexpr size_t G_statusFlags1 = 0x5020; // Flags_STATUS word 1
+    constexpr size_t G_blastPos = 0x4F3C;     // Vec: where Leon's last grenade went off (set by RE4's grenades)
+    constexpr size_t G_blastFlag = 0x4F48;    // uint8: 1 = G_blastPos is new
     constexpr uint32_t STA1_ITEM_GET = 0x00000002; // word 1: RE4's item pickup screen is up
 
     // Flag bits (GameFlags.h): flag n is bit (0x80000000 >> n) of its word.
@@ -122,13 +124,16 @@ namespace re4
     // enemy's hit zones (YARARE: head, arms, legs, torso) and fills each hit enemy's cDmgInfo; the enemy then
     // computes damage from the weapon number and plays its own reaction. Found with the v8 damage trace:
     // Leon's handgun calls it as BulletHit(Leon, &muzzle, &muzzle + 50 m, pG->weapon_no, 0, 6000.0f).
+    // Leon's incendiary grenade going off (bio4 0x73A4F6): mov ecx, <fire area list>; ...; push pos; push 0x4B;
+    // push 1; call SetFireArea(1, 0x4B, &pos, 2500 mm radius, 1500 mm high). The burning area sets enemies on fire.
+    constexpr Pattern kFireArea   { "incendiary fire area", "B9 ? ? ? ? D9 05 ? ? ? ? D9 1C 24 56 6A 4B 6A 01 E8", 0, false };
     constexpr Pattern kBulletHit  { "BulletHit", "55 8B EC 81 EC D8 00 00 00 A1 ? ? ? ? 33 C5 89 45 FC 8B 45 10 53 8B 5D 14 0F B7 D3", 0, false };
     // cActionButton m_active_flag: an action prompt ("press ... to open") is on screen (Misc.cpp)
     constexpr Pattern kActBtn     { "action prompt flag", "80 3D ? ? ? ? ? 75 ? 6A ? E8 ? ? ? ? 83 C4 ? EB", 2, false };
     // RE4 weapon numbers (pG->weapon_no; item -> weapon_no table at exe VA 0xB24B10)
     constexpr int WEP_HANDGUN = 0x01, WEP_BROKEN_BUTTERFLY = 0x02, WEP_SHOTGUN = 0x07, WEP_STRIKER = 0x08,
                   WEP_RIFLE_BOLT = 0x09, WEP_RIFLE_SEMI = 0x0A, WEP_TMP = 0x0B, WEP_CHICAGO = 0x0C, WEP_RPG = 0x0D,
-                  WEP_KNIFE = 0x10, WEP_GRENADE = 0x13, WEP_FLASH = 0x17;
+                  WEP_KNIFE = 0x10, WEP_GRENADE = 0x13, WEP_INCENDIARY = 0x16, WEP_FLASH = 0x17;
     // RE4 grenade explosion (cObj grenade, exe VA 0x73A17F): effect(0, -1, &pos, 0, 0, type, 0, 0, 0, 0) at match+0x17,
     // then sound(1, id, &pos, 0, 0, 0) at match+0x27. Grenade: effect 0x0D, sound 0x14, BulletHit(0, &pos, &pos, 0x13, 0, 6000).
     // Flash (0x73A620): effect 0x0C, sound 0x13, BulletHit(0, &pos+0.5 m up, same, 0x17, 0, 15000). Both set status flags.
@@ -170,6 +175,13 @@ namespace re4
     constexpr uint8_t IDC_ACT_BUTTON = 0x20;
     constexpr uint32_t STA_PL_FIRE = 0x00800000;       // status word 0: set by RE4 grenades
     constexpr uint32_t STA1_EXPLOSION = 0x20000000;    // status word 1 (+0x5020): set by RE4 grenades
+    // Leon rides something RE4 moves (re4_tweaks Flags_STATUS names): the boat and the jet ski, a gondola,
+    // an elevator or lift (status word 3 at +0x5028)
+    constexpr uint32_t STA_RIDE_GONDOLA = 0x00000020;  // status word 0
+    constexpr uint32_t STA1_PL_BOAT = 0x00200000;      // status word 1
+    constexpr size_t G_statusFlags3 = 0x5028;
+    constexpr uint32_t STA2_INTO_SHOP = 0x00040000;    // status word 2 (+0x5024): the merchant is open
+    constexpr uint32_t STA3_ELEVATOR = 0x00400000;     // status word 3
     // SatMgr: cSatMgr* at match+0xF; 18 matches, all the same address (DebugDisplay.cpp)
     constexpr Pattern kSatMgr     { "SatMgr",   "8D 8E B4 02 00 00 E8 ? ? ? ? 6A 00 56 B9", 0xF, true };
 }

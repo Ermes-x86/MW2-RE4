@@ -22,7 +22,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v37 (incendiary pick, no UAV)";
+constexpr const char* kVersion = "MW2RE4 v42 (incendiary fire, grenade fallback, RE4 knife, speed upgrades, rides, merchant names)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -190,6 +190,7 @@ struct Settings
     int invertMouseY = 0;
     int showControls = 1;
     int showGunList = 0;       // F5: RE4 -> MW2 gun list in the attache case and the merchant
+    int shopGunNames = 1;      // the merchant always shows the MW2 name of each RE4 gun (F5 hides it there)
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
     int grenadeTrace = 0; // research: log RE4's own effect / sound / blast calls while MW2 is off
     int incendiary = 0;   // MW2's frag (G) throws RE4's incendiary grenades instead of hand grenades (F8)
@@ -258,6 +259,7 @@ void LoadSettings()
     g_cfg.invertMouseY = GetPrivateProfileIntA("MW2RE4", "InvertMouseY", g_cfg.invertMouseY, path);
     g_cfg.showControls = GetPrivateProfileIntA("MW2RE4", "ShowControls", g_cfg.showControls, path);
     g_cfg.showGunList = GetPrivateProfileIntA("MW2RE4", "ShowGunList", g_cfg.showGunList, path);
+    g_cfg.shopGunNames = GetPrivateProfileIntA("MW2RE4", "ShopGunNames", g_cfg.shopGunNames, path);
     g_cfg.damageTrace = GetPrivateProfileIntA("MW2RE4", "DamageTrace", g_cfg.damageTrace, path);
     g_cfg.grenadeTrace = GetPrivateProfileIntA("MW2RE4", "GrenadeTrace", g_cfg.grenadeTrace, path);
     g_cfg.incendiary = GetPrivateProfileIntA("MW2RE4", "Incendiary", g_cfg.incendiary, path) != 0;
@@ -405,6 +407,9 @@ using EffectFn = void(__cdecl*)(int, int, Vec3*, int, int, int, int, int, int, i
 using SoundFn = void(__cdecl*)(int, int, Vec3*, int, int, int);
 EffectFn g_effect = nullptr;
 SoundFn g_sound = nullptr;
+using FireAreaFn = int(__fastcall*)(uint8_t* list, void* edx, int type, int kind, Vec3* pos, float radius, float height);
+FireAreaFn g_fireArea = nullptr;
+uint8_t* g_fireList = nullptr;
 uint8_t* g_qteActive = nullptr;
 uint8_t* g_idSys = nullptr;
 uint8_t* g_textBegin = nullptr, *g_textEnd = nullptr; // bio4.exe code range, for stack walks
@@ -1032,6 +1037,10 @@ const char* Blocker(uint8_t* g, uint8_t* pl)
     if (At<uint8_t>(pl, re4::Model_rno0) >= 2) return "Leon is hurt or grabbed (RE4 handles it)";
     if (At<uint32_t>(g, re4::G_statusFlags) & re4::STA_SUSPEND) return "cutscene, event or menu";
     if (g_qteActive && *g_qteActive) return "quick-time event (RE4 handles it)";
+    // Rides RE4 moves Leon on: MW2's movement cannot follow a moving floor, so RE4 has Leon until he is off
+    if (At<uint32_t>(g, re4::G_statusFlags1) & re4::STA1_PL_BOAT) return "on the boat (RE4 has Leon until he is off)";
+    if (At<uint32_t>(g, re4::G_statusFlags) & re4::STA_RIDE_GONDOLA) return "on a gondola (RE4 has Leon until he is off)";
+    if (At<uint32_t>(g, re4::G_statusFlags3) & re4::STA3_ELEVATOR) return "on a lift (RE4 has Leon until he is off)";
     if (const char* action = ActionBlocker(pl)) return action;
     if (!g_active && g_frame - g_hitCheckFrame > 3) return "RE4 gameplay camera not active";
     return nullptr;
@@ -1133,11 +1142,11 @@ __declspec(naked) void LifeDownHook()
     }
 }
 
-int CallBulletHit(uint8_t* pl, Vec3 start, Vec3 end, int weapon)
+int CallBulletHit(uint8_t* pl, Vec3 start, Vec3 end, int weapon, int flags = 0)
 {
     __try
     {
-        return g_bulletHit(pl, &start, &end, weapon, 0, 6000.f);
+        return g_bulletHit(pl, &start, &end, weapon, flags, 6000.f);
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1171,31 +1180,55 @@ int EnemiesNear(uint8_t* pl, const Vec3& c, float radius, uint8_t** out, int max
     return n;
 }
 
-// weaponNo: RE4 weapon number the blast hits with (-1 = hand / flash grenade); the incendiary's makes enemies burn.
-int IncendiaryWeaponNo();
+// What RE4's own grenades do when they go off (Leon's: bio4 0x73A050 hand, 0x73A3B6 incendiary, 0x73A620 flash).
+// Hand: explosion effects 0x0D + 0x1A, sound 0x14, then a blast hit (weapon 0x13). Flash: effect 0x0C, sound 0x13,
+// blast hit 0x17. Incendiary: fire burst 0x0B and ground fire 0x26, sound 0x22, and no blast hit: a burning area
+// (2.5 m) that sets enemies on fire. All three set the status flags and the last-blast position enemies react to.
+enum class Blast { Hand, Flash, Fire };
+bool g_fragFire = false; // MW2's frag (G) currently stands for RE4's incendiary grenades (else hand grenades)
 
-int RE4Explosion(Vec3 pos, bool flash, int weaponNo = -1)
+int RE4Explosion(Vec3 pos, Blast kind)
 {
     uint8_t* g = Global();
     __try
     {
+        bool fire = kind == Blast::Fire && g_fireArea && g_fireList;
         if (g_effect)
-            g_effect(0, -1, &pos, 0, 0, flash ? 0x0C : 0x0D, 0, 0, 0, 0);
+        {
+            if (fire)
+            {
+                g_effect(0, -1, &pos, 0, 0, 0x0B, 0, 0, 0, 0);
+                g_effect(0, -1, &pos, 0, 0, 0x26, 0, 0, 0, 0);
+            }
+            else
+            {
+                g_effect(0, -1, &pos, 0, 0, kind == Blast::Flash ? 0x0C : 0x0D, 0, 0, 0, 0);
+                if (kind != Blast::Flash)
+                    g_effect(0, -1, &pos, 0, 0, 0x1A, 0, 0, 0, 0);
+            }
+        }
         if (g_sound)
-            g_sound(1, flash ? 0x13 : 0x14, &pos, 0, 0, 0);
+            g_sound(1, fire ? 0x22 : kind == Blast::Flash ? 0x13 : 0x14, &pos, 0, 0, 0);
         if (g)
             At<uint32_t>(g, re4::G_statusFlags) |= re4::STA_PL_FIRE;
         int hits = 0;
-        if (g_bulletHit)
+        if (fire)
+            hits = g_fireArea(g_fireList, nullptr, 1, 0x4B, &pos, 2500.f, 1500.f);
+        else if (g_bulletHit)
         {
             Vec3 p = pos;
-            if (flash)
+            if (kind == Blast::Flash)
                 p.y += 500.f;
-            int weapon = weaponNo >= 0 ? weaponNo : flash ? re4::WEP_FLASH : re4::WEP_GRENADE;
-            hits = g_bulletHit(nullptr, &p, &p, weapon, 0, flash ? 15000.f : 6000.f);
+            // (an incendiary without the fire area: its weapon number, a blast like the hand grenade's)
+            int weapon = kind == Blast::Flash ? re4::WEP_FLASH : kind == Blast::Fire ? re4::WEP_INCENDIARY : re4::WEP_GRENADE;
+            hits = g_bulletHit(nullptr, &p, &p, weapon, 3, kind == Blast::Flash ? 15000.f : 6000.f);
         }
         if (g)
+        {
             At<uint32_t>(g, re4::G_statusFlags + 4) |= re4::STA1_EXPLOSION;
+            At<Vec3>(g, re4::G_blastPos) = pos;
+            At<uint8_t>(g, re4::G_blastFlag) = 1;
+        }
         return hits;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -1266,7 +1299,21 @@ void ResolveShots(uint8_t* pl)
             if (int no = ArsenalWeaponNo(sh.weapon))
                 fit.weapon = no; // exactly the RE4 gun, with its upgrades
         int weapon = fit.weapon;
-        int hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
+        int hits = 0;
+        if (weapon == re4::WEP_KNIFE)
+        {
+            // MW2's knife swing as RE4's knife (bio4 0x752F80): weapon 0x10 with flag 1, several hit lines swept
+            // across the blade's arc (here straight ahead and 15 degrees to each side, in host space, Z up)
+            for (float a : { 0.f, -0.26f, 0.26f })
+            {
+                float c = std::cos(a), s = std::sin(a);
+                float dx = d[0] / len, dy = d[1] / len;
+                float e[3] = { sh.origin[0] + (dx * c - dy * s) * range, sh.origin[1] + (dx * s + dy * c) * range, endH[2] };
+                hits = std::max(hits, CallBulletHit(pl, ToRe4(sh.origin), ToRe4(e), weapon, 1));
+            }
+        }
+        else
+            hits = CallBulletHit(pl, ToRe4(sh.origin), ToRe4(endH), weapon);
         LogShotTargets(sh.sequence);
         if (hits > 0)
         {
@@ -1293,13 +1340,13 @@ void ResolveShots(uint8_t* pl)
         // then the attack-hit routine in blast mode (no attacker, start == end, radius).
         Vec3 c = ToRe4(e.origin);
         g_hitScaleUntil = 0; // RE4's own grenade damage
-        // MW2's frag stands for RE4's incendiary when the F8 picker chose it: hit with its weapon number
-        int fire = !flash && g_cfg.incendiary && strstr(name, "frag") ? IncendiaryWeaponNo() : -1;
-        int hits = RE4Explosion(c, flash, fire);
+        // MW2's frag is the RE4 grenade it was thrown as (hand or incendiary, see the grenade sync)
+        bool fire = !flash && g_fragFire && strstr(name, "frag");
+        int hits = RE4Explosion(c, flash ? Blast::Flash : fire ? Blast::Fire : Blast::Hand);
         ++g_blastsSent;
-        Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s (weapon 0x%02X), BulletHit returned %d", e.sequence,
-            name[0] ? name : "?", e.kind, e.radius, flash ? "flash grenade" : fire >= 0 ? "incendiary" : "hand grenade",
-            fire >= 0 ? fire : flash ? re4::WEP_FLASH : re4::WEP_GRENADE, hits);
+        Log("explosion %u: MW2 %s (kind %u, radius %.1f m) -> RE4 %s, %s %d", e.sequence, name[0] ? name : "?", e.kind,
+            e.radius, flash ? "flash grenade" : fire ? "incendiary" : "hand grenade",
+            fire ? "fire area" : "BulletHit returned", hits);
     }
 }
 
@@ -1789,18 +1836,6 @@ ItemEraseFn g_itemErase = nullptr;
 ChargeNumFn g_chargeNum = nullptr;
 WeaponNoFn g_weaponNo = nullptr;
 
-// RE4's weapon number for its incendiary grenade (from WeaponId2WeaponNo); the hand grenade's if unknown.
-int IncendiaryWeaponNo()
-{
-    int no = g_weaponNo ? g_weaponNo(re4::ITEM_FLAME_GRENADE) : 0;
-    static int logged = -1;
-    if (no != logged)
-    {
-        Log("incendiary grenade: RE4 weapon number 0x%02X", no);
-        logged = no;
-    }
-    return no ? no : re4::WEP_GRENADE;
-}
 WeaponChangeFn g_weaponChange = nullptr;
 SpecialTunedFn g_specialTuned = nullptr;
 bool ArsenalReady()
@@ -1900,6 +1935,36 @@ int Capacity(uint8_t* item)
     int level = ((At<uint16_t>(item, re4::Item_levels) >> 12) & 0xF) + 1;
     int n = g_chargeNum(At<uint16_t>(item, re4::Item_id), level);
     return n == 0x8000 ? 1 : n; // 0x8000: single shot (rocket launcher)
+}
+// RE4's firing speed and reload speed upgrades of the equipped gun, for MW2: time factors in thousandths,
+// fire | reload << 16 (0 = unchanged). MW2 shortens that gun's fire / reload times and animations by them.
+// RE4's tables differ per gun; these are close to its handgun / shotgun / rifle steps.
+uint32_t SpeedUpgrades()
+{
+    static const uint16_t fire[] = { 1000, 850, 720, 610, 520, 450 };
+    static const uint16_t reload[] = { 1000, 850, 600, 450, 400, 350 };
+    if (!g_active || !ArsenalReady())
+        return 0;
+    __try
+    {
+        uint8_t* item = EquippedItem();
+        if (!item)
+            return 0;
+        uint16_t levels = At<uint16_t>(item, re4::Item_levels);
+        int f = std::min((levels >> 4) & 0xF, 5), r = std::min((levels >> 8) & 0xF, 5);
+        static int logged = -1;
+        if (logged != (f | r << 4))
+        {
+            logged = f | r << 4;
+            Log("speed upgrades: firing speed level %d, reload speed level %d -> MW2 times x%.2f / x%.2f", f + 1, r + 1,
+                fire[f] / 1000.f, reload[r] / 1000.f);
+        }
+        return fire[f] | (uint32_t)reload[r] << 16;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return 0;
+    }
 }
 // Exclusive upgrades with unlimited ammo: Chicago Typewriter, Handcannon; and the Infinite Launcher.
 bool Unlimited(uint8_t* item)
@@ -2028,7 +2093,12 @@ void PickerApply(size_t entry)
     {
         g_cfg.incendiary = entry == kPickIncendiary;
         WritePrivateProfileStringA("MW2RE4", "Incendiary", g_cfg.incendiary ? "1" : "0", path);
-        Notice(g_cfg.incendiary ? "G throws incendiary grenades" : "G throws hand grenades", 2500);
+        bool fire = g_cfg.incendiary != 0;
+        if (CountItem(fire ? re4::ITEM_FLAME_GRENADE : re4::ITEM_GRENADE))
+            Notice(fire ? "G throws incendiary grenades" : "G throws hand grenades", 2500);
+        else
+            Notice(fire ? "No incendiary grenades in the attache case yet" : "No hand grenades in the attache case yet",
+                   3000);
         Log("picker: G grenade = %s", g_cfg.incendiary ? "incendiary" : "hand grenade");
         return;
     }
@@ -2166,6 +2236,13 @@ void ArsenalUpdate(bool focused)
     if (next && !nextWas)
         nextQueued = true;
     nextWas = next;
+    // G with no RE4 grenades: MW2 has nothing to throw, say why
+    static bool throwWas = false;
+    bool throwing = focused && g_active && !MenuOpen() && Down('G');
+    if (throwing && !throwWas && ArsenalReady() && g_guest.ready && g_features.lethalAmmo <= 0 &&
+        !CountItem(re4::ITEM_GRENADE) && !CountItem(re4::ITEM_FLAME_GRENADE))
+        Notice("No hand or incendiary grenades in the attache case", 2000);
+    throwWas = throwing;
     if (!ArsenalReady())
         return;
     if (g_arm.runtimeStarted != g_runtimeStarted)
@@ -2337,8 +2414,24 @@ void ArsenalUpdate(bool focused)
     }
 
     // 3. Grenades.
-    // MW2's frag is the grenade type chosen in the F8 picker (hand grenades or incendiaries)
-    const uint16_t fragItem = g_cfg.incendiary ? re4::ITEM_FLAME_GRENADE : re4::ITEM_GRENADE;
+    // MW2's frag is the grenade type chosen in the F8 picker (hand grenades or incendiaries); when the case has
+    // none of that type but has the other, G throws the other (the pick comes back once the case has it again).
+    // Not switched while a throw is still to be taken from the case, so it is taken from the type it was thrown as.
+    if (g_arm.frag < 0 || g_features.lethalAmmo >= g_arm.frag)
+    {
+        bool fire = g_cfg.incendiary != 0;
+        if (!CountItem(fire ? re4::ITEM_FLAME_GRENADE : re4::ITEM_GRENADE) &&
+            CountItem(fire ? re4::ITEM_GRENADE : re4::ITEM_FLAME_GRENADE))
+            fire = !fire;
+        if (fire != g_fragFire)
+        {
+            g_fragFire = fire;
+            g_arm.frag = -1; // send the new type's count
+            Log("arsenal: G throws %s grenades%s", fire ? "incendiary" : "hand", (fire != (g_cfg.incendiary != 0)) ?
+                " (the case has none of the picked type)" : "");
+        }
+    }
+    const uint16_t fragItem = g_fragFire ? re4::ITEM_FLAME_GRENADE : re4::ITEM_GRENADE;
     uint32_t fragWeapon = CatalogWeapon("frag grenade"), flashWeapon = CatalogWeapon("flash grenade");
     int grenades = CountItem(fragItem);
     int flashes = CountItem(re4::ITEM_FLASH_GRENADE);
@@ -2746,6 +2839,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
     memcpy(&g_hostMovement.reserved[1], &g_mouseTotalY, sizeof(float));
     g_hostMovement.reserved[2] = 0;
     g_hostMovement.reserved[3] = LeonLook();
+    g_hostMovement.reserved[4] = SpeedUpgrades();
     c->host = g_host;
     c->hostMovement = g_hostMovement;
     c->lock = {};
@@ -3226,9 +3320,14 @@ void DrawOverlay(IDirect3DDevice9* device)
     bool drawMw2 = g_active && ticking && !ItemGetOpen();
     uint8_t* gl = Global();
     // F5 shows or hides the gun list (checked here: the case and the merchant stop RE4's camera hook)
-    static bool f5WasDown = false;
+    static bool f5WasDown = false, shopHidden = false;
     bool f5 = Focused() && Down(VK_F5);
-    if (f5 && !f5WasDown && g_requested && ArsenalReady())
+    bool shop = gl && (At<uint32_t>(gl, re4::G_statusFlags + 8) & re4::STA2_INTO_SHOP);
+    if (!shop)
+        shopHidden = false;
+    if (f5 && !f5WasDown && g_requested && ArsenalReady() && shop && g_cfg.shopGunNames && !g_cfg.showGunList)
+        shopHidden = !shopHidden; // the merchant's own list: F5 hides it for this visit
+    else if (f5 && !f5WasDown && g_requested && ArsenalReady())
     {
         g_cfg.showGunList = !g_cfg.showGunList;
         char path[MAX_PATH];
@@ -3237,8 +3336,8 @@ void DrawOverlay(IDirect3DDevice9* device)
         Log("F5: gun list %s", g_cfg.showGunList ? "on" : "off");
     }
     f5WasDown = f5;
-    bool gunList = g_cfg.showGunList && g_requested && ArsenalReady() && gl &&
-                   (At<uint32_t>(gl, re4::G_statusFlags) & re4::STA_SUB_SCRN);
+    bool gunList = (g_cfg.showGunList || (shop && g_cfg.shopGunNames && !shopHidden)) && g_requested &&
+                   ArsenalReady() && gl && (shop || (At<uint32_t>(gl, re4::G_statusFlags) & re4::STA_SUB_SCRN));
     if (!drawMw2 && !indicator && !gunList)
         return;
     CreateChromaShader(device);
@@ -3581,6 +3680,11 @@ bool Init()
     uint8_t* em = Find(m, re4::kEmMgr);
     if (uint8_t* bh = Find(m, re4::kBulletHit))
         g_bulletHit = (BulletHitFn)bh;
+    if (uint8_t* fa = Find(m, re4::kFireArea))
+    {
+        g_fireList = *(uint8_t**)(fa + 1);
+        g_fireArea = (FireAreaFn)(fa + 24 + *(int32_t*)(fa + 20));
+    }
     if (uint8_t* ab = Find(m, re4::kActBtn))
         g_actBtnActive = *(uint8_t**)ab;
     if (uint8_t* fx = Find(m, re4::kExplosionFx))

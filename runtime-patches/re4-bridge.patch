@@ -517,15 +517,17 @@ index a8620ac..981e5b3 100644
  assets.workspace = true
  audio.workspace = true
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..21891d6 100644
+index 32839dd..f76ccd8 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
-@@ -479,9 +479,18 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+@@ -479,9 +479,20 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
          }
          bridge.host = unsafe { memory.read(HOST) };
          bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
 +        // MW2-RE4: Leon's look in RE4 (1 jacket, 2 none) for Leon-style arms
 +        asset_model::re4_leon_style::set_look(bridge.host_movement.reserved[3]);
++        // MW2-RE4: RE4's firing / reload speed upgrades of the equipped gun
++        sim::set_bridge_timing(bridge.host_movement.reserved[4]);
          bridge.host_lock = unsafe { memory.read(HOST_LOCK) };
          bridge.features.request = unsafe { memory.read(features::BASE) };
 -        bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
@@ -540,7 +542,7 @@ index 32839dd..21891d6 100644
          bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
      }
      if let Some(_guard) = memory.lock_scene() {
-@@ -681,8 +690,8 @@ fn anchor_authority(
+@@ -681,8 +692,8 @@ fn anchor_authority(
          let origin = ps.origin;
          let released = scene.release_traps(
              ps.origin,
@@ -551,7 +553,7 @@ index 32839dd..21891d6 100644
              0x0281_0011,
              &mut bridge.ghosts,
          );
-@@ -772,8 +781,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+@@ -772,8 +783,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
      direction = direction.map(|d| d / length);
      match scene.unblock_lift(
          ps.origin,
@@ -802,6 +804,37 @@ index 4812938..ff049a3 100644
      pub sz_xanims: Option<Ptr>,
  
      pub sz_xanims_right: Option<Ptr>,
+diff --git a/crates/render_anim/src/anim/viewmodel_controller.rs b/crates/render_anim/src/anim/viewmodel_controller.rs
+index 1e29af9..c90b348 100644
+--- a/crates/render_anim/src/anim/viewmodel_controller.rs
++++ b/crates/render_anim/src/anim/viewmodel_controller.rs
+@@ -487,6 +487,26 @@ impl ViewmodelController {
+     }
+ 
+     fn perk_scaled_action_timer(&self, state: WeaponState, timer_ms: Option<i32>) -> Option<i32> {
++        let timer_ms = self.bridge_scaled_action_timer(state, timer_ms);
++        self.perk_scaled_action_timer_inner(state, timer_ms)
++    }
++
++    /// RE4 bridge: the gun's firing / reload speed upgrades play its fire / reload animations faster, matching
++    /// the sim's shortened times (only the bridge's equipped gun is held while they are set).
++    fn bridge_scaled_action_timer(&self, state: WeaponState, timer_ms: Option<i32>) -> Option<i32> {
++        let (fire, reload) = sim::bridge_timing();
++        let k = match state {
++            WeaponState::Firing | WeaponState::Rechambering => fire,
++            WeaponState::Reloading { .. } | WeaponState::ReloadStarting | WeaponState::ReloadEnding => reload,
++            _ => 1.0,
++        };
++        if k >= 1.0 {
++            return timer_ms;
++        }
++        timer_ms.map(|t| ((t as f32) * k).round() as i32)
++    }
++
++    fn perk_scaled_action_timer_inner(&self, state: WeaponState, timer_ms: Option<i32>) -> Option<i32> {
+         if state == WeaponState::SprintOut
+             && self.predicted_perks1 & playerstate_iw4::PERK1_FASTSPRINTRECOVERY != 0
+         {
 diff --git a/crates/render_anim/src/occupancy/fpv_present.rs b/crates/render_anim/src/occupancy/fpv_present.rs
 index c8a89b8..272e9d9 100644
 --- a/crates/render_anim/src/occupancy/fpv_present.rs
@@ -1253,11 +1286,24 @@ index 0629207..10f4cd9 100644
      /// Fires the fuse of this client's live projectile on the next tick, for
      /// host-detected triggers (a host actor crossing a planted claymore).
      pub fn detonate_projectile(&mut self, owner: ClientId, id: u32) -> bool {
+diff --git a/crates/sim/src/lib.rs b/crates/sim/src/lib.rs
+index bf9601f..4d037b8 100644
+--- a/crates/sim/src/lib.rs
++++ b/crates/sim/src/lib.rs
+@@ -157,7 +157,7 @@ pub fn weapon_model_attachment(model: &str) -> Option<u32> {
+ pub use world::{
+     ClientId, ExternalMovementBackend, HitvolDumpRow, PendingLocalSound, PendingPlayerCardEvent,
+     PendingPlayerCardKind, PendingPrint, PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels,
+-    SimClipMesh, SimStaticModel, SimTriggerHull, Tick, blank_player_state,
++    SimClipMesh, SimStaticModel, SimTriggerHull, Tick, blank_player_state, bridge_timing, set_bridge_timing,
+ };
+ pub use world_objects::{
+     DestructibleLoopSound, GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP,
 diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
-index e9ac812..6d69c85 100644
+index e9ac812..738d423 100644
 --- a/crates/sim/src/world.rs
 +++ b/crates/sim/src/world.rs
-@@ -1038,12 +1038,18 @@ impl SimState {
+@@ -1038,12 +1038,36 @@ impl SimState {
      }
  
      pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
@@ -1274,11 +1320,29 @@ index e9ac812..6d69c85 100644
 +        if clip != 0 && (clip >> 32) as u32 == weapon && facts.clip_size > 0 {
 +            facts.clip_size = clip as u32 as i32;
 +        }
++        if clip != 0 && (clip >> 32) as u32 == weapon {
++            let (fire, reload) = bridge_timing();
++            let scale = |ms: &mut i32, k: f32| *ms = ((*ms as f32) * k).round() as i32;
++            for ms in [&mut facts.fire_time_ms, &mut facts.rechamber_time_ms, &mut facts.rechamber_bolt_time_ms] {
++                scale(ms, fire);
++            }
++            for ms in [
++                &mut facts.reload_time_ms,
++                &mut facts.reload_empty_time_ms,
++                &mut facts.reload_start_time_ms,
++                &mut facts.reload_end_time_ms,
++                &mut facts.reload_add_time_ms,
++                &mut facts.reload_empty_add_time_ms,
++                &mut facts.reload_start_add_time_ms,
++            ] {
++                scale(ms, reload);
++            }
++        }
 +        Some(facts)
      }
  
      pub(crate) fn can_transition_weapon(&self, from: u32, to: u32) -> bool {
-@@ -3423,3 +3429,12 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
+@@ -3423,3 +3447,27 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
      ps.corpse_index = -1;
      ps
  }
@@ -1286,6 +1350,21 @@ index e9ac812..6d69c85 100644
 +/// RE4 bridge: the clip size of the host's equipped gun (its capacity upgrade), as `weapon << 32 | size`;
 +/// 0 = none. Process-wide so the authority and the client prediction reload alike.
 +static BRIDGE_CLIP_SIZE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// RE4 bridge: RE4's firing speed / reload speed upgrades of the host's equipped gun (the clip-size gun above),
++/// as time factors in thousandths, `fire | reload << 16`; 0 = unchanged.
++static BRIDGE_TIMING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
++pub fn set_bridge_timing(packed: u32) {
++    BRIDGE_TIMING.store(packed, std::sync::atomic::Ordering::Relaxed);
++}
++
++/// (fire, reload) time factors of the bridge's equipped gun; 1.0 = unchanged.
++pub fn bridge_timing() -> (f32, f32) {
++    let packed = BRIDGE_TIMING.load(std::sync::atomic::Ordering::Relaxed);
++    let factor = |v: u32| if v == 0 { 1.0 } else { (v as f32 / 1000.0).clamp(0.2, 1.0) };
++    (factor(packed & 0xffff), factor(packed >> 16))
++}
 +
 +pub fn set_bridge_clip_size(weapon: u32, size: i32) {
 +    let value = if size > 0 { (u64::from(weapon) << 32) | u64::from(size as u32) } else { 0 };
