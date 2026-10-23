@@ -158,9 +158,14 @@ RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
 
 ## Troubleshooting
 
-- **Nothing happens on F6.** Check that `dinput8.dll` and `MW2RE4.asi` are in
-  `Resident Evil 4\Bin32` and that `MW2RE4.log` appears there after starting
-  the game.
+- **Nothing happens on F6.** Check that `MW2RE4.asi` and an ASI loader
+  (`dinput8.dll`, or `winmm.dll`) are in `Resident Evil 4\Bin32` and that
+  `MW2RE4.log` appears there after starting the game. No log means the mod
+  never loaded: another mod's `dinput8.dll` (re4_tweaks, Raz0r's trainer) does
+  not load `.asi` mods. Install 0.1.4 or later (it then adds the loader as
+  `winmm.dll`), or copy `files\dinput8.dll` from the zip into `Bin32` as
+  `winmm.dll` yourself. On Linux / Steam Deck add
+  `WINEDLLOVERRIDES="dinput8,winmm=n,b" %command%` to RE4's launch options.
 - **The first start is slow.** The first time, the mod builds about 1 GB of
   MW2 texture and shader cache in `<runtime folder>\iw4l-artifacts\cache`.
   That can take several minutes on a slower CPU or a hard drive; later starts

@@ -209,13 +209,31 @@ if (-not $RuntimeDir) {
 }
 
 # --- ASI loader ------------------------------------------------------------
-# RE4 loads .asi plugins through an ASI loader in Bin32 (dinput8.dll: Ultimate ASI Loader, also the one
-# re4_tweaks ships). One already there is kept; otherwise the bundled Ultimate ASI Loader is installed.
-$loader = Join-Path $bin 'dinput8.dll'
-$installLoader = -not (Test-Path $loader)
-if ($installLoader) { Say 'No ASI loader in RE4\Bin32: the bundled Ultimate ASI Loader (dinput8.dll) will be installed.' }
-else { Say 'ASI loader found (Bin32\dinput8.dll); it is kept.' Green }
-if (Test-Path (Join-Path $bin 're4_tweaks.asi')) {
+# RE4 loads .asi plugins through Ultimate ASI Loader in Bin32. bio4.exe loads dinput8.dll, winmm.dll and
+# xinput1_3.dll from there, so the loader can take any of these names. A dinput8.dll that is not an ASI
+# loader (re4_tweaks', a trainer's) is kept, and the loader goes in under the next free name instead.
+function Test-AsiLoader([string]$path) {
+    if (-not (Test-Path $path)) { return $false }
+    $text = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($path))
+    return $text.Contains('Ultimate ASI Loader') -or $text.Contains('ThirteenAG')
+}
+$loader = $null
+$installLoader = $false
+foreach ($name in 'dinput8.dll', 'winmm.dll', 'xinput1_3.dll') {
+    if (Test-AsiLoader (Join-Path $bin $name)) { $loader = Join-Path $bin $name; break }
+}
+if ($loader) { Say "ASI loader found (Bin32\$(Split-Path -Leaf $loader)); it is kept." Green }
+else {
+    foreach ($name in 'dinput8.dll', 'winmm.dll', 'xinput1_3.dll') {
+        if (-not (Test-Path (Join-Path $bin $name))) { $loader = Join-Path $bin $name; break }
+    }
+    if (-not $loader) { throw 'Bin32 has dinput8.dll, winmm.dll and xinput1_3.dll from other mods and none of them loads .asi plugins. Move one of them out of Bin32 and run the installer again.' }
+    $installLoader = $true
+    $name = Split-Path -Leaf $loader
+    if ($name -eq 'dinput8.dll') { Say 'No ASI loader in RE4\Bin32: the bundled Ultimate ASI Loader (dinput8.dll) will be installed.' }
+    else { Say "Bin32\dinput8.dll belongs to another mod (re4_tweaks or a trainer) and does not load .asi plugins: it is kept, and the bundled Ultimate ASI Loader is installed as $name." Yellow }
+}
+if ((Test-Path (Join-Path $bin 're4_tweaks.asi')) -or (Test-Path (Join-Path $bin 're4_tweaks'))) {
     Say 're4_tweaks is installed. MW2-RE4 is not tested with it; if MW2 mode misbehaves, try without it.' Yellow
 }
 
@@ -232,7 +250,7 @@ $backup = Join-Path $Re4Dir "MW2RE4-backup\$stamp"
 New-Item -ItemType Directory -Force $RuntimeDir | Out-Null
 
 # ASI loader and plugin.
-if ($installLoader) { Copy-Item (Join-Path $files 'dinput8.dll') $loader }
+if ($installLoader) { Copy-Item (Join-Path $files 'dinput8.dll') $loader }  # the same file under any of its names
 Backup-File (Join-Path $bin 'MW2RE4.asi') $backup (Join-Path $files 'MW2RE4.asi')
 Copy-Item (Join-Path $files 'MW2RE4.asi') (Join-Path $bin 'MW2RE4.asi') -Force
 
@@ -268,7 +286,9 @@ $loaderHash = if ($installLoader) { (Get-FileHash $loader).Hash } else { $null }
 if (-not $loaderHash -and (Test-Path $manifestPath)) {
     # an update: the ASI loader an earlier install added is still this mod's
     $previous = Get-Content $manifestPath -Raw | ConvertFrom-Json
-    if ($previous.asiLoader -and (Test-Path $loader) -and (Get-FileHash $loader).Hash -eq $previous.asiLoader) {
+    $previousName = if ($previous.asiLoaderName) { $previous.asiLoaderName } else { 'dinput8.dll' }
+    if ($previous.asiLoader -and $previousName -eq (Split-Path -Leaf $loader) -and (Test-Path $loader) -and
+        (Get-FileHash $loader).Hash -eq $previous.asiLoader) {
         $loaderHash = $previous.asiLoader
     }
 }
@@ -278,6 +298,7 @@ $manifest = [ordered]@{
     mw2 = $Mw2Dir
     runtime = $RuntimeDir
     asiLoader = $loaderHash
+    asiLoaderName = $(if ($loaderHash) { Split-Path -Leaf $loader } else { $null })
     backup = $(if (Test-Path $backup) { $backup } else { $null })
 }
 $manifest | ConvertTo-Json | Set-Content -Path $manifestPath -Encoding UTF8

@@ -84,14 +84,16 @@ $ini = Join-Path $bin 'MW2RE4.ini'
 if ((Test-Path $ini) -and (Ask-YesNo 'Remove your MW2-RE4 options (MW2RE4.ini)?')) { Remove-Item $ini -Force; Say 'Removed MW2RE4.ini' }
 
 # The ASI loader goes only if this installer added it, it is unchanged and no other plugin needs it.
-$loader = Join-Path $bin 'dinput8.dll'
+# (dinput8.dll, or winmm.dll / xinput1_3.dll when another mod already had dinput8.dll)
+$loaderName = if ($manifest.asiLoaderName) { $manifest.asiLoaderName } else { 'dinput8.dll' }
+$loader = Join-Path $bin $loaderName
 if ($manifest.asiLoader -and (Test-Path $loader) -and (Get-FileHash $loader).Hash -eq $manifest.asiLoader) {
     $others = @(Get-ChildItem -Path $bin -Filter '*.asi' -Recurse -Depth 2 -File -ErrorAction SilentlyContinue)
     if ($others.Count) {
-        Say "Kept the ASI loader (dinput8.dll): other plugins use it ($($others.Name -join ', '))." Yellow
-    } elseif (Ask-YesNo 'Remove the ASI loader (dinput8.dll) MW2-RE4 installed?') {
+        Say "Kept the ASI loader ($loaderName): other plugins use it ($($others.Name -join ', '))." Yellow
+    } elseif (Ask-YesNo "Remove the ASI loader ($loaderName) MW2-RE4 installed?") {
         Remove-Item $loader -Force
-        Say 'Removed dinput8.dll'
+        Say "Removed $loaderName"
     }
 }
 
