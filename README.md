@@ -145,17 +145,14 @@ RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
 - The **Mine Thrower** and the **P.R.L. 412** have no MW2 gun yet (the Mine
   Thrower's mines stick and then go off, which no MW2 gun does). Equipping one
   keeps your last MW2 gun; press F6 to use them as Leon.
-- Firing speed and reload speed upgrades do not change the MW2 gun yet
-  (firepower and capacity do).
-- Incendiary grenades and the thermal scope are not adapted yet.
-- Vehicle and turret sections (the boat, mounted guns, the mine cart, the jet
-  ski) and the chapters where you play as Ashley are RE4's: press F6 to switch
-  MW2 off for them.
-- Moving floors and elevators are not adapted to MW2 movement; you may need
-  F6 there too.
-- Boss weak spots are not specially handled yet, and the MW2 knife does not
-  use RE4's knife damage yet.
-- The merchant shows the RE4 gun names (F5 shows the MW2 names next to them).
+- The thermal scope is not adapted yet.
+- On the boat, the jet ski, gondolas and lifts, RE4 takes Leon by itself and
+  MW2 comes back when he is off. Mounted guns, the mine cart, other moving
+  platforms and the chapters where you play as Ashley are RE4's: press F6 to
+  switch MW2 off for them.
+- Boss weak spots are not specially handled yet.
+- The merchant's own list shows the RE4 gun names; a list of the matching MW2
+  guns opens next to it (F5 hides it).
 - Later chapters are not fully tested.
 - Only tested with the Steam release of RE4 UHD, without other RE4 mods.
 
