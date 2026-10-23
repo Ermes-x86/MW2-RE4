@@ -57,10 +57,10 @@ index 3bc033f..05d474d 100644
  
 diff --git a/crates/asset_model/src/re4_leon_style.rs b/crates/asset_model/src/re4_leon_style.rs
 new file mode 100644
-index 0000000..6f65705
+index 0000000..5419d80
 --- /dev/null
 +++ b/crates/asset_model/src/re4_leon_style.rs
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,453 @@
 +//! MW2-RE4: Leon-style first-person arms (shared state and the paint recipe).
 +//!
 +//! With `IW4L_RE4_LEON_STYLE` set (the host loads mp_subbase), the map's two arms models stand for Leon's two
@@ -471,9 +471,9 @@ index 0000000..6f65705
 +                let x = (i % w) as f32 * 1024.0 / width as f32;
 +                let y = (i / w) as f32 * 1024.0 / height as f32;
 +                let grain = (value_noise(x / 1.7, y / 1.7, 53) - 0.5) * 1.8;
-+                let tone = 63.0 + (l - 63.0) * 0.72;
++                let tone = 60.0 + (l - 63.0) * 0.72;
 +                // a warm red-brown (the user's "more brown"); MW2's lighting greys it a little
-+                for (c, ratio) in [1.30, 0.90, 0.56].iter().enumerate() {
++                for (c, ratio) in [1.42, 0.88, 0.46].iter().enumerate() {
 +                    p[c] = (tone * ratio + grain).round().clamp(0.0, 255.0) as u8;
 +                }
 +            }
@@ -496,6 +496,16 @@ index 0000000..6f65705
 +    }
 +}
 +/// Gloves: little shine, so they read black rather than dark grey under MW2's lights.
++/// The jacket's leather: little shine, so it reads as solid matte brown under MW2's lights, not glossy or washed out.
++pub fn jacket_specular(look: Look, glove: bool, labels: &[u8], rgba: &mut [u8]) {
++    if look != Look::Jacket || glove || rgba.len() != labels.len() * 4 { return; }
++    for (pixel, &label) in rgba.chunks_exact_mut(4).zip(labels) {
++        if matches!(label, LABEL_ARM | LABEL_UPPER) {
++            for c in &mut pixel[..3] { *c = (f32::from(*c) * 0.35).round() as u8; }
++        }
++    }
++}
++
 +pub fn glove_specular(glove: bool, labels: &[u8], rgba: &mut [u8]) {
 +    if !glove || rgba.len() != labels.len() * 4 { return; }
 +    for (pixel, &label) in rgba.chunks_exact_mut(4).zip(labels) {
@@ -962,10 +972,10 @@ index 4070734..e3a1e50 100644
  pub mod model_lighting_cache;
 diff --git a/crates/render_frontend/src/prepare/scene/re4_leon_style.rs b/crates/render_frontend/src/prepare/scene/re4_leon_style.rs
 new file mode 100644
-index 0000000..054a324
+index 0000000..d3ebbd6
 --- /dev/null
 +++ b/crates/render_frontend/src/prepare/scene/re4_leon_style.rs
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,243 @@
 +//! MW2-RE4: Leon-style first-person arms. MW2's own arms models are kept (their fit and animation are MW2's);
 +//! only their colour maps are repainted from the player's own MW2 images while the map's images are handed to
 +//! the GPU (`asset_model::re4_leon_style`: the jacket arms get Leon's brown leather, the bare arms his short
@@ -1099,6 +1109,11 @@ index 0000000..054a324
 +            let mut labels = vec![style::LABEL_NONE; (width * height) as usize];
 +            let look = users[0].2;
 +            let glove = material.name.to_ascii_lowercase().contains("glove");
++            if glove && enabled {
++                // MW2's own gloves, untouched: dark grey with full fingers and their stitching (the repainted
++                // near-black glove and skin fingertips did not look right)
++                continue;
++            }
 +            for (mesh, surfaces, _) in users {
 +                let Some(entry) = fpv.0.get_at(*mesh) else { continue };
 +                let more = style::uv_labels(&entry.skel, surfaces, width, height);
@@ -1109,11 +1124,11 @@ index 0000000..054a324
 +                }
 +            }
 +            if !color {
-+                if !enabled || (specular && !glove) {
++                if !enabled {
 +                    continue;
 +                }
 +                if specular {
-+                    style::glove_specular(glove, &labels, &mut rgba);
++                    style::jacket_specular(look, glove, &labels, &mut rgba);
 +                } else {
 +                    style::smooth_normals(look, glove, &labels, width, height, &mut rgba);
 +                    style::soften_jacket_normals(look, glove, &labels, width, height, &mut rgba);
