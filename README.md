@@ -154,7 +154,8 @@ RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
 - The merchant's own list shows the RE4 gun names; a list of the matching MW2
   guns opens next to it (F5 hides it).
 - Later chapters are not fully tested.
-- Only tested with the Steam release of RE4 UHD, without other RE4 mods.
+- Only tested with the Steam release of RE4 UHD, alone and with re4_tweaks
+  1.9.1 (from 0.1.5). With re4_tweaks the F11 damage sliders have no effect.
 
 ## Troubleshooting
 
@@ -179,6 +180,8 @@ RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
   `EXE_PLAYERKICKED_INACTIVE` / "saved account is unavailable".** MW2 could not
   create its `account.dat` (for example on an exFAT/FAT32 drive). Fixed in
   0.1.5: update and press F6 again.
+- **RE4 crashes before the menu, or on F6, with re4_tweaks installed.** Fixed
+  in 0.1.5: update.
 - **MW2 is in the way in a special section.** Press F6 to give RE4 full
   control, and F6 again afterwards.
 

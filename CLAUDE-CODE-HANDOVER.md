@@ -300,3 +300,16 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   RenderError", so it is not a workaround without runtime work. The option was reverted, not shipped.
 - Idea for later: start the runtime with stderr redirected to a file (e.g. `iw4l-artifacts\logs\stderr.log`) so a
   user's abort reason reaches the logs they send.
+
+## 0.1.5 (2026-10-24): account file, re4_tweaks
+
+- Subscriber report: startup always timed out. Runtime log: "unlock: saved account is unavailable", spawn class
+  refused ("Unlocks at level 7"), then `EXE_PLAYERKICKED_INACTIVE`. The runtime creates `account.dat` with a hard
+  link (`console/src/local_account.rs`), which fails on exFAT/FAT32; the error went to stderr only. Fixed in the
+  runtime: rename fallback, a session-only account for a bridge runtime that still cannot create it, both logged.
+  Reproduced and verified offline with `IW4L_ACCOUNT_PATH` pointing at a path that cannot be created.
+- re4_tweaks 1.9.1 rewrites RE4's mouse code: the mouse patterns failed, Init was retried every 0.8 s and each retry
+  hooked the caption / grenade-trace thunks again onto themselves, so RE4 crashed before the menu. v44: the mouse
+  falls back to Joy[0] (same addresses), optional hooks once after the required patterns, HookCall/HookThunk skip a
+  site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works). With re4_tweaks the LifeDownSet2
+  thunk is not found, so the F11 damage sliders do nothing.
