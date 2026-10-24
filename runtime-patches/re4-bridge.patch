@@ -835,6 +835,157 @@ index 56d4052..446ca44 100644
                      glass_encoded: 0,
                  }),
              input.start,
+diff --git a/crates/console/src/local_account.rs b/crates/console/src/local_account.rs
+index 2958b9b..7b211be 100644
+--- a/crates/console/src/local_account.rs
++++ b/crates/console/src/local_account.rs
+@@ -28,6 +28,8 @@ pub(crate) struct AccountPersistence {
+     background: Option<BackgroundSave>,
+     latest: Option<LocalAccount>,
+     async_mode: bool,
++    /// MW2-RE4: the account could not be saved; it lives for this session only.
++    memory_only: bool,
+ }
+ 
+ struct BackgroundSave {
+@@ -123,8 +125,12 @@ pub(crate) fn load(
+             crate::user_settings::settings_path(&identity.artifacts)
+                 .map(|path| path.with_file_name("account.dat"))
+         });
++    let bridge = std::env::var_os("IW4L_GTA_BRIDGE").is_some();
+     let Some(path) = path else {
+         warn!("no HOME or XDG_CONFIG_HOME; no durable local account available");
++        if bridge {
++            memory_account(&mut commands, &mut persistence);
++        }
+         return;
+     };
+     match load_or_create(&path) {
+@@ -134,7 +140,40 @@ pub(crate) fn load(
+             commands.insert_resource(net::AccountSaveReceipt(account.snapshot.clone()));
+             commands.insert_resource(account);
+         }
+-        Err(error) => warn!("could not load local account {}: {error}", path.display()),
++        Err(error) => {
++            warn!("could not load local account {}: {error}", path.display());
++            diag::warn!(
++                Launch,
++                "account: could not load or create {}: {error}",
++                path.display()
++            );
++            // MW2-RE4: without an account "unlock all" fails and the spawn class stays locked, so the player is
++            // never spawned and gets kicked as inactive. The bridge only needs the unlocks for this session.
++            if bridge {
++                memory_account(&mut commands, &mut persistence);
++            }
++        }
++    }
++}
++
++/// A new account kept in memory only (not saved), for a bridge runtime whose account file cannot be written.
++fn memory_account(commands: &mut Commands, persistence: &mut AccountPersistence) {
++    match net::AccountKey::generate() {
++        Ok(key) => {
++            let account = LocalAccount {
++                id: key.account(),
++                key,
++                snapshot: None,
++            };
++            persistence.memory_only = true;
++            commands.insert_resource(net::AccountSaveReceipt(None));
++            commands.insert_resource(account);
++            diag::warn!(
++                Launch,
++                "account: using a session-only account (progression is not saved)"
++            );
++        }
++        Err(_) => diag::warn!(Launch, "account: session-only account key generation failed"),
+     }
+ }
+ 
+@@ -152,10 +191,39 @@ pub(crate) fn save(
+     ) {
+         return;
+     }
+-    let (Some(mut account), Some(path)) = (account, persistence.path.clone()) else {
++    let Some(mut account) = account else {
+         return;
+     };
+     let mut authority = authority;
++    let Some(path) = persistence.path.clone() else {
++        // MW2-RE4 session-only account: "saved" in memory, so progression and acknowledgements carry on
++        if persistence.memory_only {
++            let snapshot = if *role == frame::RuntimeRole::Listen {
++                authority
++                    .as_ref()
++                    .and_then(|authority| authority.0.persistent_data().snapshot(account.id))
++            } else {
++                account.snapshot.clone()
++            };
++            if let Some(snapshot) = snapshot
++                && persistence.saved.as_ref() != Some(&snapshot)
++            {
++                let _ = player_data.refresh(Some(&snapshot));
++                persistence.saved = Some(snapshot.clone());
++                account.snapshot = Some(snapshot.clone());
++                if let Some(receipt) = receipt.as_mut() {
++                    receipt.0 = Some(snapshot.clone());
++                }
++                if let Some(authority) = authority.as_mut() {
++                    authority
++                        .0
++                        .persistent_data_mut()
++                        .acknowledge_saved(account.id, snapshot.revision);
++                }
++            }
++        }
++        return;
++    };
+     let snapshot = if *role == frame::RuntimeRole::Listen {
+         authority
+             .as_ref()
+@@ -328,7 +396,11 @@ pub(crate) fn route_unlock_commands(
+             echo.write("unlock: disconnect to the main menu first");
+             continue;
+         }
+-        let (Some(account), Some(path)) = (account.as_mut(), persistence.path.as_ref()) else {
++        let path = persistence.path.clone();
++        let Some(account) = account
++            .as_mut()
++            .filter(|_| path.is_some() || persistence.memory_only)
++        else {
+             echo.write("unlock: saved account is unavailable");
+             continue;
+         };
+@@ -355,8 +427,10 @@ pub(crate) fn route_unlock_commands(
+                 key: account.key.clone(),
+                 snapshot: Some(snapshot.clone()),
+             };
+-            save_current(path, &next, persistence.saved.as_ref())
+-                .map_err(|error| format!("cannot save account: {error}"))?;
++            if let Some(path) = path.as_ref() {
++                save_current(path, &next, persistence.saved.as_ref())
++                    .map_err(|error| format!("cannot save account: {error}"))?;
++            }
+             Ok((next, snapshot, store))
+         })();
+         match result {
+@@ -592,8 +666,13 @@ fn write_atomic(path: &Path, account: &LocalAccount, create: bool) -> io::Result
+         drop(file);
+         if create {
+             // Publish the first identity without replacing a concurrent creator's identity.
+-            fs::hard_link(&temporary, path)?;
+-            fs::remove_file(&temporary)?;
++            match fs::hard_link(&temporary, path) {
++                Ok(()) => fs::remove_file(&temporary)?,
++                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(error),
++                // MW2-RE4: exFAT / FAT32 drives (often a second game drive) have no hard links
++                Err(_) if !path.exists() => fs::rename(&temporary, path)?,
++                Err(error) => return Err(error),
++            }
+         } else {
+             fs::rename(&temporary, path)?;
+         }
 diff --git a/crates/fastfile_iw4/src/load/weapon.rs b/crates/fastfile_iw4/src/load/weapon.rs
 index fb04dfb..be4f217 100644
 --- a/crates/fastfile_iw4/src/load/weapon.rs

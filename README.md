@@ -175,6 +175,10 @@ RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
   runtime log is `<runtime folder>\iw4l-artifacts\logs\latest.log`; check that
   the `Modern Warfare 2.lnk` shortcut in the runtime folder points to your MW2
   folder (running the installer again fixes it).
+- **Startup always times out and the runtime log says
+  `EXE_PLAYERKICKED_INACTIVE` / "saved account is unavailable".** MW2 could not
+  create its `account.dat` (for example on an exFAT/FAT32 drive). Fixed in
+  0.1.5: update and press F6 again.
 - **MW2 is in the way in a special section.** Press F6 to give RE4 full
   control, and F6 again afterwards.
 
