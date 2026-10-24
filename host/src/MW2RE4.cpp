@@ -22,7 +22,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v43 (MW2 frames synced to RE4)";
+constexpr const char* kVersion = "MW2RE4 v44 (works next to re4_tweaks)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -362,7 +362,10 @@ bool HookCall(uint8_t* site, void* hook, void** orig)
             (unsigned)(site - (uint8_t*)GetModuleHandleA(nullptr)), site[0]);
         return false;
     }
-    *orig = site + 5 + *(int32_t*)(site + 1);
+    uint8_t* target = site + 5 + *(int32_t*)(site + 1);
+    if (target == (uint8_t*)hook)
+        return true; // already ours: hooking again would make it call itself
+    *orig = target;
     DWORD old;
     if (!VirtualProtect(site, 5, PAGE_EXECUTE_READWRITE, &old))
         return false;
@@ -381,7 +384,10 @@ bool HookThunk(uint8_t* thunk, void* hook, void** orig)
             (unsigned)(thunk - (uint8_t*)GetModuleHandleA(nullptr)), thunk[0]);
         return false;
     }
-    *orig = thunk + 5 + *(int32_t*)(thunk + 1);
+    uint8_t* target = thunk + 5 + *(int32_t*)(thunk + 1);
+    if (target == (uint8_t*)hook)
+        return true; // already ours: hooking again would make it call itself
+    *orig = target;
     DWORD old;
     if (!VirtualProtect(thunk, 5, PAGE_EXECUTE_READWRITE, &old))
         return false;
@@ -3669,6 +3675,8 @@ IDirect3D9* WINAPI D3DCreateHook(UINT version)
 bool g_ready = false;
 DWORD WINAPI StartBridge(void*);
 
+void InstallOptionalHooks(const Module& m);
+
 bool Init()
 {
     Module m = ReadModule();
@@ -3701,29 +3709,16 @@ bool Init()
     }
     if (uint8_t* q = Find(m, re4::kQteActive))
         g_qteActive = *(uint8_t**)q;
-    if (g_cfg.grenadeTrace)
-        InstallGrenadeTrace((uint8_t*)GetModuleHandleA(nullptr));
-    if (uint8_t* ld = Find(m, re4::kLifeDown))
+    // Init is retried while the exe unpacks: hook nothing until everything required is there, and each hook once
+    // (a second hook of the same function would call itself forever). The mouse code is not required: other mods
+    // (re4_tweaks' raw mouse input) rewrite it.
+    if (!a || !b || !c || !d || !s || !x || !ko || !kt || !jy || !pr)
+        return false;
+    static bool optionalHooked = false;
+    if (!optionalHooked)
     {
-        // the JMP thunk all callers use
-        uint8_t* text = m.code.empty() ? nullptr : m.code[0].begin;
-        uint8_t* thunk = nullptr;
-        for (size_t i = 0; text && i + 5 < 0x10000; ++i)
-            if (text[i] == 0xE9 && text + i + 5 + *(int32_t*)(text + i + 1) == ld)
-            {
-                thunk = text + i;
-                break;
-            }
-        if (thunk && HookThunk(thunk, (void*)&LifeDownHook, &g_lifeDownOrig))
-            Log("damage sliders: LifeDownSet2 hooked at thunk 0x%p", (void*)thunk);
-        else
-            Log("damage sliders: LifeDownSet2 thunk not found; sliders have no effect");
-    }
-    if (uint8_t* ms = Find(m, re4::kMesSetCall))
-    {
-        uint8_t* thunk = ms[0] == 0xE8 ? ms + 5 + *(int32_t*)(ms + 1) : nullptr;
-        if (thunk && HookThunk(thunk, (void*)&MesSetHook, (void**)&g_mesSetOrig))
-            Log("captions: MesSet hooked at thunk 0x%p", (void*)thunk);
+        optionalHooked = true;
+        InstallOptionalHooks(m);
     }
     auto callTarget = [](uint8_t* site) -> uint8_t* {
         return site && site[0] == 0xE8 ? site + 5 + *(int32_t*)(site + 1) : nullptr;
@@ -3752,25 +3747,34 @@ bool Init()
         g_textBegin = m.code[0].begin;
         g_textEnd = m.code[0].begin + m.code[0].size;
     }
-    if (!a || !b || !c || !d || !e || !f || !s || !x || !ko || !kt || !jy || !pr)
-        return false;
     g_keyOn = *(uint64_t**)ko;
     g_keyTrg = *(uint64_t**)kt;
     g_joy = *(uint8_t**)jy - 9;
     g_pG = *(uint8_t***)a;
     g_pPL = *(uint8_t***)b;
-    g_mouseX = *(int32_t**)e;
-    g_mouseY = *(int32_t**)f;
+    if (e && f)
+    {
+        g_mouseX = *(int32_t**)e;
+        g_mouseY = *(int32_t**)f;
+    }
+    else
+    {
+        // RE4 keeps its mouse deltas in Joy[0]'s left stick (same addresses the mouse patterns give)
+        g_mouseX = (int32_t*)g_joy;
+        g_mouseY = (int32_t*)(g_joy + 4);
+        Log("mouse: RE4's mouse code is changed by another mod (re4_tweaks?); reading its deltas at Joy[0]");
+    }
     g_satMgr = *(uint8_t**)s;
     Log("pG=0x%p pPL=0x%p mouse=0x%p/0x%p SatMgr=0x%p", (void*)g_pG, (void*)g_pPL, (void*)g_mouseX, (void*)g_mouseY,
         (void*)g_satMgr);
-    if (!HookCall(c, (void*)&HitCheckHook, (void**)&g_hitCheckOrig))
+    static bool hitCheckHooked = false, cameraHooked = false, d3dHooked = false, padHooked = false;
+    if (!hitCheckHooked && !(hitCheckHooked = HookCall(c, (void*)&HitCheckHook, (void**)&g_hitCheckOrig)))
         return false;
-    if (!HookCall(d, (void*)&CameraSetHook, (void**)&g_cameraSetOrig))
+    if (!cameraHooked && !(cameraHooked = HookCall(d, (void*)&CameraSetHook, (void**)&g_cameraSetOrig)))
         return false;
-    if (!HookCall(x, (void*)&D3DCreateHook, (void**)&g_d3dCreateOrig))
+    if (!d3dHooked && !(d3dHooked = HookCall(x, (void*)&D3DCreateHook, (void**)&g_d3dCreateOrig)))
         return false;
-    if (!HookCall(pr, (void*)&PadReadHook, (void**)&g_padReadOrig))
+    if (!padHooked && !(padHooked = HookCall(pr, (void*)&PadReadHook, (void**)&g_padReadOrig)))
         return false;
     Log("input filter on PadRead: keys 0x%p/0x%p joy 0x%p", (void*)g_keyOn, (void*)g_keyTrg, (void*)g_joy);
     if (g_cfg.damageTrace && g_emMgr)
@@ -3781,6 +3785,35 @@ bool Init()
     }
     Log("hooked CameraQuasiFPS::hitCheck and the camera set call in CameraControl::move");
     return true;
+}
+
+// Hooks Init may do without (each installed once): grenade trace, damage sliders, captions.
+void InstallOptionalHooks(const Module& m)
+{
+    if (g_cfg.grenadeTrace)
+        InstallGrenadeTrace((uint8_t*)GetModuleHandleA(nullptr));
+    if (uint8_t* ld = Find(m, re4::kLifeDown))
+    {
+        // the JMP thunk all callers use
+        uint8_t* text = m.code.empty() ? nullptr : m.code[0].begin;
+        uint8_t* thunk = nullptr;
+        for (size_t i = 0; text && i + 5 < 0x10000; ++i)
+            if (text[i] == 0xE9 && text + i + 5 + *(int32_t*)(text + i + 1) == ld)
+            {
+                thunk = text + i;
+                break;
+            }
+        if (thunk && HookThunk(thunk, (void*)&LifeDownHook, &g_lifeDownOrig))
+            Log("damage sliders: LifeDownSet2 hooked at thunk 0x%p", (void*)thunk);
+        else
+            Log("damage sliders: LifeDownSet2 thunk not found; sliders have no effect");
+    }
+    if (uint8_t* ms = Find(m, re4::kMesSetCall))
+    {
+        uint8_t* thunk = ms[0] == 0xE8 ? ms + 5 + *(int32_t*)(ms + 1) : nullptr;
+        if (thunk && HookThunk(thunk, (void*)&MesSetHook, (void**)&g_mesSetOrig))
+            Log("captions: MesSet hooked at thunk 0x%p", (void*)thunk);
+    }
 }
 
 DWORD WINAPI Startup(void*)
