@@ -311,5 +311,5 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
 - re4_tweaks 1.9.1 rewrites RE4's mouse code: the mouse patterns failed, Init was retried every 0.8 s and each retry
   hooked the caption / grenade-trace thunks again onto themselves, so RE4 crashed before the menu. v44: the mouse
   falls back to Joy[0] (same addresses), optional hooks once after the required patterns, HookCall/HookThunk skip a
-  site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works). With re4_tweaks the LifeDownSet2
-  thunk is not found, so the F11 damage sliders do nothing.
+  site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
+  F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).

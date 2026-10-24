@@ -155,7 +155,7 @@ RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
   guns opens next to it (F5 hides it).
 - Later chapters are not fully tested.
 - Only tested with the Steam release of RE4 UHD, alone and with re4_tweaks
-  1.9.1 (from 0.1.5). With re4_tweaks the F11 damage sliders have no effect.
+  1.9.1 (from 0.1.5).
 
 ## Troubleshooting
 
