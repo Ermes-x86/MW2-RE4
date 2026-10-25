@@ -578,10 +578,57 @@ index a8620ac..981e5b3 100644
  assets.workspace = true
  audio.workspace = true
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..d5d262e 100644
+index 32839dd..7a2e098 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
-@@ -154,6 +154,7 @@ unsafe extern "system" {
+@@ -125,6 +125,46 @@ struct GuestCamera {
+     sequence: u32,
+ }
+ const _: () = assert!(size_of::<GuestCamera>() == 64);
++/// MW2-RE4 balancing menu, written by the host after the guest camera (free space before the image).
++/// Percentages: 100 = MW2's own; `sprint_ms` 0xFFFF = MW2's own sprint, 0 = none.
++const BALANCE: usize = CAMERA + 64;
++const BALANCE_MAGIC: u32 = 0x314C_4142; // "BAL1"
++#[repr(C)]
++#[derive(Clone, Copy, Default)]
++struct Balance {
++    magic: u32,
++    walk: u16,
++    ads_walk: u16,
++    sprint_ms: u16,
++    spread: u16,
++    recoil: u16,
++    fire_blend: u16,
++    reload_blend: u16,
++    fire_ms: u16,
++    reload_ms: u16,
++    padding: u16,
++    reserved: [u32; 10],
++}
++const _: () = assert!(size_of::<Balance>() == 64 && BALANCE + 64 <= FRAME);
++impl Balance {
++    fn to_sim(self) -> sim::BridgeBalance {
++        if self.magic != BALANCE_MAGIC {
++            return sim::BridgeBalance::NONE;
++        }
++        let pct = |v: u16, lo: f32, hi: f32| (f32::from(v) / 100.0).clamp(lo, hi);
++        sim::BridgeBalance {
++            walk: pct(self.walk, 0.3, 1.5),
++            ads_walk: pct(self.ads_walk, 0.2, 1.0),
++            sprint_ms: if self.sprint_ms == 0xFFFF { -1 } else { i32::from(self.sprint_ms.min(8000)) },
++            spread: pct(self.spread, 0.5, 4.0),
++            recoil: i32::from(self.recoil.clamp(50, 400)),
++            fire_blend: pct(self.fire_blend, 0.0, 1.0),
++            reload_blend: pct(self.reload_blend, 0.0, 1.0),
++            fire_ms: i32::from(self.fire_ms),
++            reload_ms: i32::from(self.reload_ms),
++        }
++    }
++}
+ const _: () = assert!(size_of::<HostMovement>() == 48 && size_of::<GuestMovement>() == 64);
+ #[repr(C)]
+ #[derive(Clone, Copy, Default)]
+@@ -154,6 +194,7 @@ unsafe extern "system" {
          size: usize,
      ) -> *mut c_void;
      fn CreateMutexW(attributes: *const c_void, owner: i32, name: *const u16) -> *mut c_void;
@@ -589,7 +636,7 @@ index 32839dd..d5d262e 100644
      fn WaitForSingleObject(handle: *mut c_void, timeout: u32) -> u32;
      fn ReleaseMutex(handle: *mut c_void) -> i32;
      fn UnmapViewOfFile(address: *const c_void) -> i32;
-@@ -185,6 +186,8 @@ struct Memory {
+@@ -185,6 +226,8 @@ struct Memory {
      control: usize,
      frame: usize,
      scene: usize,
@@ -598,7 +645,7 @@ index 32839dd..d5d262e 100644
  }
  impl Drop for Memory {
      fn drop(&mut self) {
-@@ -193,6 +196,9 @@ impl Drop for Memory {
+@@ -193,6 +236,9 @@ impl Drop for Memory {
              for handle in [self.mapping, self.control, self.frame, self.scene] {
                  CloseHandle(handle as *mut c_void);
              }
@@ -608,7 +655,7 @@ index 32839dd..d5d262e 100644
          }
      }
  }
-@@ -248,12 +254,15 @@ impl Memory {
+@@ -248,12 +294,15 @@ impl Memory {
                  }
                  return None;
              }
@@ -624,7 +671,7 @@ index 32839dd..d5d262e 100644
              }))
          }
      }
-@@ -409,8 +418,15 @@ pub fn install(app: &mut App) {
+@@ -409,8 +458,15 @@ pub fn install(app: &mut App) {
  }
  fn pace_runtime(mut bridge: ResMut<Bridge>) {
      bridge.sleep_timing = [0.0; 2];
@@ -642,7 +689,7 @@ index 32839dd..d5d262e 100644
              16_667
          } else {
              66_667
-@@ -479,9 +495,20 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+@@ -479,9 +535,22 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
          }
          bridge.host = unsafe { memory.read(HOST) };
          bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
@@ -650,6 +697,8 @@ index 32839dd..d5d262e 100644
 +        asset_model::re4_leon_style::set_look(bridge.host_movement.reserved[3]);
 +        // MW2-RE4: RE4's firing / reload speed upgrades of the equipped gun
 +        sim::set_bridge_timing(bridge.host_movement.reserved[4]);
++        // MW2-RE4: the balancing menu (movement, sprint, recoil, spread, RE4 gun timing)
++        sim::set_bridge_balance(unsafe { memory.read::<Balance>(BALANCE) }.to_sim());
          bridge.host_lock = unsafe { memory.read(HOST_LOCK) };
          bridge.features.request = unsafe { memory.read(features::BASE) };
 -        bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
@@ -664,7 +713,7 @@ index 32839dd..d5d262e 100644
          bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
      }
      if let Some(_guard) = memory.lock_scene() {
-@@ -681,8 +708,8 @@ fn anchor_authority(
+@@ -681,8 +750,8 @@ fn anchor_authority(
          let origin = ps.origin;
          let released = scene.release_traps(
              ps.origin,
@@ -675,7 +724,7 @@ index 32839dd..d5d262e 100644
              0x0281_0011,
              &mut bridge.ghosts,
          );
-@@ -772,8 +799,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+@@ -772,8 +841,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
      direction = direction.map(|d| d / length);
      match scene.unblock_lift(
          ps.origin,
@@ -687,7 +736,7 @@ index 32839dd..d5d262e 100644
          direction,
      ) {
 diff --git a/crates/bootstrap/src/gta_bridge/features.rs b/crates/bootstrap/src/gta_bridge/features.rs
-index c415d3c..6fc3b2f 100644
+index c415d3c..9149fa2 100644
 --- a/crates/bootstrap/src/gta_bridge/features.rs
 +++ b/crates/bootstrap/src/gta_bridge/features.rs
 @@ -15,6 +15,8 @@ pub(super) struct Request {
@@ -699,7 +748,7 @@ index c415d3c..6fc3b2f 100644
      received: u32,
      pending: Option<(u32, u32)>,
      ack: u32,
-@@ -116,7 +118,13 @@ pub(super) fn host_actions(
+@@ -116,7 +118,14 @@ pub(super) fn host_actions(
      let Some(ps) = world.0.player(local.0).copied() else {
          return;
      };
@@ -709,12 +758,13 @@ index c415d3c..6fc3b2f 100644
 +        // RE4 owns the guns, the ammo and the health: no saved loadout, no free
 +        // frag grenade, and the MW2 player never dies.
 +        world.0.bridge_god(local.0);
++        world.0.bridge_recoil(local.0, sim::bridge_balance().recoil);
 +    }
 +    if !re4 && !bridge.features.catalog.is_empty() {
          let step = bridge.features.loadout.step(&world.0, &ps);
          match step {
              Some(super::loadout::Step::Select(weapon)) => bridge.features.forced_selection = Some(weapon),
-@@ -144,7 +152,7 @@ pub(super) fn host_actions(
+@@ -144,7 +153,7 @@ pub(super) fn host_actions(
              .equipment_facts_for(w as u32)
              .is_some_and(|f| f.is_offhand() && matches!(f.offhand_class, 1 | 4 | 5))
      });
@@ -723,7 +773,7 @@ index c415d3c..6fc3b2f 100644
          bridge.features.equipment_epoch = bridge.host_movement.epoch;
          if let Some(weapon) = world
              .0
-@@ -167,6 +175,28 @@ pub(super) fn host_actions(
+@@ -167,6 +176,28 @@ pub(super) fn host_actions(
          return;
      }
      bridge.features.received = request.sequence;
@@ -752,7 +802,7 @@ index c415d3c..6fc3b2f 100644
      if request.kind == 3 {
          // `weapon` carries the id of a planted projectile GTA saw triggered.
          let applied = world.0.detonate_projectile(local.0, request.weapon);
-@@ -203,6 +233,10 @@ pub(super) fn host_actions(
+@@ -203,6 +234,10 @@ pub(super) fn host_actions(
          }
      }
  }
@@ -763,7 +813,7 @@ index c415d3c..6fc3b2f 100644
  fn position(bridge: &Bridge, origin: [f32; 3]) -> [f32; 3] {
      let anchor = bridge.anchor.unwrap_or(bridge.host_movement.foot);
      std::array::from_fn(|i| anchor[i] + (origin[i] - bridge.engine_anchor[i]) / UNITS_PER_METER)
-@@ -321,7 +355,7 @@ pub(super) fn export(
+@@ -321,7 +356,7 @@ pub(super) fn export(
              }
          }
      }
@@ -1077,11 +1127,39 @@ index 4812938..ff049a3 100644
      pub sz_xanims: Option<Ptr>,
  
      pub sz_xanims_right: Option<Ptr>,
+diff --git a/crates/movement_iw4/src/cmdscale.rs b/crates/movement_iw4/src/cmdscale.rs
+index 507e908..064b538 100644
+--- a/crates/movement_iw4/src/cmdscale.rs
++++ b/crates/movement_iw4/src/cmdscale.rs
+@@ -17,6 +17,11 @@ pub struct CmdScaleWalkContext {
+     pub weapon_ads_move_speed_scale: f32,
+ 
+     pub shellshock_affects_movement: bool,
++
++    /// Host bridge balancing: movement factor, and a further one while aiming down the sights. 1.0 = MW2's own.
++    pub bridge_walk_scale: f32,
++
++    pub bridge_ads_walk_scale: f32,
+ }
+ 
+ #[must_use]
+@@ -80,7 +85,10 @@ pub fn cmd_scale_walk(ps: &PlayerState, cmd: &UserCmd, context: CmdScaleWalkCont
+         scale *= 0.4_f32;
+     }
+ 
+-    scale * ps.move_speed_scale_multiplier
++    let ads = ps.f_weapon_pos_frac.clamp(0.0, 1.0);
++    let bridge = context.bridge_walk_scale * (1.0 + (context.bridge_ads_walk_scale - 1.0) * ads);
++
++    scale * ps.move_speed_scale_multiplier * bridge
+ }
+ 
+ fn scale_command(
 diff --git a/crates/render_anim/src/anim/viewmodel_controller.rs b/crates/render_anim/src/anim/viewmodel_controller.rs
-index 1e29af9..c90b348 100644
+index 1e29af9..3422f47 100644
 --- a/crates/render_anim/src/anim/viewmodel_controller.rs
 +++ b/crates/render_anim/src/anim/viewmodel_controller.rs
-@@ -487,6 +487,26 @@ impl ViewmodelController {
+@@ -487,6 +487,27 @@ impl ViewmodelController {
      }
  
      fn perk_scaled_action_timer(&self, state: WeaponState, timer_ms: Option<i32>) -> Option<i32> {
@@ -1089,16 +1167,17 @@ index 1e29af9..c90b348 100644
 +        self.perk_scaled_action_timer_inner(state, timer_ms)
 +    }
 +
-+    /// RE4 bridge: the gun's firing / reload speed upgrades play its fire / reload animations faster, matching
-+    /// the sim's shortened times (only the bridge's equipped gun is held while they are set).
++    /// RE4 bridge: the gun's firing / reload speed upgrades (and the balancing menu's RE4 timing) play its fire /
++    /// reload animations at the sim's times (only the bridge's equipped gun is held while they are set). A slower
++    /// fire keeps MW2's own fire animation and waits after it; a slower reload stretches the reload (up to 3x).
 +    fn bridge_scaled_action_timer(&self, state: WeaponState, timer_ms: Option<i32>) -> Option<i32> {
 +        let (fire, reload) = sim::bridge_timing();
 +        let k = match state {
-+            WeaponState::Firing | WeaponState::Rechambering => fire,
-+            WeaponState::Reloading { .. } | WeaponState::ReloadStarting | WeaponState::ReloadEnding => reload,
++            WeaponState::Firing | WeaponState::Rechambering => fire.min(1.0),
++            WeaponState::Reloading { .. } | WeaponState::ReloadStarting | WeaponState::ReloadEnding => reload.min(3.0),
 +            _ => 1.0,
 +        };
-+        if k >= 1.0 {
++        if k == 1.0 {
 +            return timer_ms;
 +        }
 +        timer_ms.map(|t| ((t as f32) * k).round() as i32)
@@ -1441,7 +1520,7 @@ index ef13042..ef8d15b 100644
          self.exact_by_image.clear();
          self.reused_handles = 0;
 diff --git a/crates/sim/src/carrier.rs b/crates/sim/src/carrier.rs
-index 0629207..10f4cd9 100644
+index 0629207..ad3d942 100644
 --- a/crates/sim/src/carrier.rs
 +++ b/crates/sim/src/carrier.rs
 @@ -20,6 +20,27 @@ pub struct SimWorld {
@@ -1472,7 +1551,7 @@ index 0629207..10f4cd9 100644
  impl Default for SimWorld {
      fn default() -> Self {
          let mut ecs = World::new();
-@@ -223,6 +244,89 @@ impl SimWorld {
+@@ -223,6 +244,109 @@ impl SimWorld {
          true
      }
  
@@ -1547,6 +1626,26 @@ index 0629207..10f4cd9 100644
 +        true
 +    }
 +
++    /// RE4 bridge balancing: the player's recoil in percent (100 = MW2's own), through the recoil scale MW2's
++    /// own scripts use. Written only when it changes; a scale the bridge did not set is left alone at 100.
++    pub fn bridge_recoil(&mut self, id: ClientId, percent: i32) {
++        use std::sync::atomic::{AtomicI32, Ordering};
++        static SET: AtomicI32 = AtomicI32::new(100);
++        let flag = playerstate_iw4::weap_flags::RECOIL_SCALE;
++        let mut frame = self.frame();
++        let Some(ps) = frame.player_mut(id) else { return };
++        if percent != 100 {
++            if ps.weap_flags & flag == 0 || ps.recoil_scale != percent {
++                ps.recoil_scale = percent;
++                ps.weap_flags |= flag;
++            }
++            SET.store(percent, Ordering::Relaxed);
++        } else if SET.swap(100, Ordering::Relaxed) != 100 && ps.weap_flags & flag != 0 {
++            ps.weap_flags &= !flag;
++            ps.recoil_scale = 0;
++        }
++    }
++
 +    /// RE4 bridge: the MW2 player cannot die; the host's own character owns health.
 +    pub fn bridge_god(&mut self, id: ClientId) {
 +        let mut frame = self.frame();
@@ -1563,23 +1662,64 @@ index 0629207..10f4cd9 100644
      /// host-detected triggers (a host actor crossing a planted claymore).
      pub fn detonate_projectile(&mut self, owner: ClientId, id: u32) -> bool {
 diff --git a/crates/sim/src/lib.rs b/crates/sim/src/lib.rs
-index bf9601f..4d037b8 100644
+index bf9601f..ac57af7 100644
 --- a/crates/sim/src/lib.rs
 +++ b/crates/sim/src/lib.rs
-@@ -157,7 +157,7 @@ pub fn weapon_model_attachment(model: &str) -> Option<u32> {
+@@ -157,7 +157,8 @@ pub fn weapon_model_attachment(model: &str) -> Option<u32> {
  pub use world::{
      ClientId, ExternalMovementBackend, HitvolDumpRow, PendingLocalSound, PendingPlayerCardEvent,
      PendingPlayerCardKind, PendingPrint, PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels,
 -    SimClipMesh, SimStaticModel, SimTriggerHull, Tick, blank_player_state,
 +    SimClipMesh, SimStaticModel, SimTriggerHull, Tick, blank_player_state, bridge_timing, set_bridge_timing,
++    BridgeBalance, bridge_balance, set_bridge_balance,
  };
  pub use world_objects::{
      DestructibleLoopSound, GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP,
+diff --git a/crates/sim/src/step.rs b/crates/sim/src/step.rs
+index 441a3c5..513d45d 100644
+--- a/crates/sim/src/step.rs
++++ b/crates/sim/src/step.rs
+@@ -2450,8 +2450,14 @@ fn pmove_context(
+     can_hold_breath: bool,
+     shellshock_affects_movement: bool,
+ ) -> PmoveSingleContext {
+-    let player_sprint_time = 4.0_f32;
+-    let weapon_max_sprint_time = get_max_sprint_time(weapon_scales.2, player_sprint_time);
++    // Host bridge balancing (MW2-RE4): sprint length (0 = no sprinting) and movement speed.
++    let balance = crate::world::bridge_balance();
++    let player_sprint_time = if balance.sprint_ms >= 0 { balance.sprint_ms as f32 / 1000.0 } else { 4.0_f32 };
++    let weapon_max_sprint_time = if balance.sprint_ms == 0 {
++        0
++    } else {
++        get_max_sprint_time(weapon_scales.2, player_sprint_time)
++    };
+ 
+     let air = AirMoveContext {
+         player_spectate_speed_scale: 1.0,
+@@ -2469,6 +2475,8 @@ fn pmove_context(
+                 weapon_ads_move_speed_scale: weapon_scales.1,
+ 
+                 shellshock_affects_movement,
++                bridge_walk_scale: balance.walk,
++                bridge_ads_walk_scale: balance.ads_walk,
+             },
+             weapon_move_scale: 1.0,
+             old_buttons,
+@@ -2494,7 +2502,8 @@ fn pmove_context(
+         sprint: SprintContext {
+             weapon_max_sprint_time,
+             sprint_forever: false,
+-            min_sprint_time_seconds: 1.0,
++            // a short sprint must still be able to start
++            min_sprint_time_seconds: (player_sprint_time * 0.4).min(1.0),
+             sprint_delay_seconds: 0.0,
+ 
+             sprint_forward_minimum: 105,
 diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
-index e9ac812..738d423 100644
+index e9ac812..351f16f 100644
 --- a/crates/sim/src/world.rs
 +++ b/crates/sim/src/world.rs
-@@ -1038,12 +1038,36 @@ impl SimState {
+@@ -1038,12 +1038,61 @@ impl SimState {
      }
  
      pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
@@ -1597,10 +1737,35 @@ index e9ac812..738d423 100644
 +            facts.clip_size = clip as u32 as i32;
 +        }
 +        if clip != 0 && (clip >> 32) as u32 == weapon {
-+            let (fire, reload) = bridge_timing();
++            let (fire, reload) = bridge_upgrade_timing();
++            let balance = bridge_balance();
++            let fire = blended_time_factor(fire, balance.fire_blend, balance.fire_ms, fire_cycle_ms(&facts));
++            let reload = blended_time_factor(reload, balance.reload_blend, balance.reload_ms, full_reload_ms(&facts));
++            BRIDGE_EFFECTIVE_TIMING.store(
++                u64::from(fire.to_bits()) | (u64::from(reload.to_bits()) << 32),
++                std::sync::atomic::Ordering::Relaxed,
++            );
 +            let scale = |ms: &mut i32, k: f32| *ms = ((*ms as f32) * k).round() as i32;
-+            for ms in [&mut facts.fire_time_ms, &mut facts.rechamber_time_ms, &mut facts.rechamber_bolt_time_ms] {
++            for ms in [
++                &mut facts.fire_time_ms,
++                &mut facts.rechamber_time_ms,
++                &mut facts.rechamber_bolt_time_ms,
++                &mut facts.burst_cooldown_ms,
++            ] {
 +                scale(ms, fire);
++            }
++            if balance.spread != 1.0 {
++                for spread in [
++                    &mut facts.hip_spread_stand_min,
++                    &mut facts.hip_spread_ducked_min,
++                    &mut facts.hip_spread_prone_min,
++                    &mut facts.hip_spread_stand_max,
++                    &mut facts.hip_spread_ducked_max,
++                    &mut facts.hip_spread_prone_max,
++                    &mut facts.ads_spread,
++                ] {
++                    *spread *= balance.spread;
++                }
 +            }
 +            for ms in [
 +                &mut facts.reload_time_ms,
@@ -1618,7 +1783,7 @@ index e9ac812..738d423 100644
      }
  
      pub(crate) fn can_transition_weapon(&self, from: u32, to: u32) -> bool {
-@@ -3423,3 +3447,27 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
+@@ -3423,3 +3472,121 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
      ps.corpse_index = -1;
      ps
  }
@@ -1635,11 +1800,105 @@ index e9ac812..738d423 100644
 +    BRIDGE_TIMING.store(packed, std::sync::atomic::Ordering::Relaxed);
 +}
 +
-+/// (fire, reload) time factors of the bridge's equipped gun; 1.0 = unchanged.
-+pub fn bridge_timing() -> (f32, f32) {
++/// RE4's firing / reload speed upgrades alone, as time factors; 1.0 = unchanged.
++fn bridge_upgrade_timing() -> (f32, f32) {
 +    let packed = BRIDGE_TIMING.load(std::sync::atomic::Ordering::Relaxed);
 +    let factor = |v: u32| if v == 0 { 1.0 } else { (v as f32 / 1000.0).clamp(0.2, 1.0) };
 +    (factor(packed & 0xffff), factor(packed >> 16))
++}
++
++/// The (fire, reload) time factors last applied to the bridge's equipped gun: the upgrades, blended toward the
++/// host gun's own times by the balancing menu. `f32` bits, `fire | reload << 32`; 0 = none yet.
++static BRIDGE_EFFECTIVE_TIMING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++/// (fire, reload) time factors of the bridge's equipped gun; 1.0 = unchanged.
++pub fn bridge_timing() -> (f32, f32) {
++    let packed = BRIDGE_EFFECTIVE_TIMING.load(std::sync::atomic::Ordering::Relaxed);
++    if packed == 0 {
++        return bridge_upgrade_timing();
++    }
++    (f32::from_bits(packed as u32), f32::from_bits((packed >> 32) as u32))
++}
++
++/// MW2-RE4 balancing menu: movement and gun handling of the host player. `NONE` = MW2's own.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct BridgeBalance {
++    /// Movement speed factor.
++    pub walk: f32,
++    /// Further movement factor while aiming down the sights (blended by the ADS fraction).
++    pub ads_walk: f32,
++    /// Sprint length in ms; 0 = no sprinting, negative = MW2's own (4 s).
++    pub sprint_ms: i32,
++    /// Bullet spread factor (hip and ADS).
++    pub spread: f32,
++    /// Recoil (view and gun kick) in percent; 100 = MW2's own.
++    pub recoil: i32,
++    /// 0 = MW2's time between shots, 1 = the host gun's (`fire_ms`).
++    pub fire_blend: f32,
++    /// 0 = MW2's reload time, 1 = the host gun's (`reload_ms`).
++    pub reload_blend: f32,
++    /// The host gun's time between shots, upgrades included; 0 = unknown.
++    pub fire_ms: i32,
++    /// The host gun's full reload time, upgrades included; 0 = unknown.
++    pub reload_ms: i32,
++}
++
++impl BridgeBalance {
++    pub const NONE: Self = Self {
++        walk: 1.0,
++        ads_walk: 1.0,
++        sprint_ms: -1,
++        spread: 1.0,
++        recoil: 100,
++        fire_blend: 0.0,
++        reload_blend: 0.0,
++        fire_ms: 0,
++        reload_ms: 0,
++    };
++}
++
++/// Process-wide so the authority and the client prediction move and fire alike.
++static BRIDGE_BALANCE: std::sync::RwLock<BridgeBalance> = std::sync::RwLock::new(BridgeBalance::NONE);
++
++pub fn set_bridge_balance(balance: BridgeBalance) {
++    if let Ok(mut current) = BRIDGE_BALANCE.write() {
++        *current = balance;
++    }
++}
++
++pub fn bridge_balance() -> BridgeBalance {
++    BRIDGE_BALANCE.read().map_or(BridgeBalance::NONE, |b| *b)
++}
++
++/// The time factor that blends `upgrade` (MW2's time with RE4's upgrades) toward `target_ms` (the host gun's
++/// own time) for a gun whose MW2 time is `base_ms`.
++fn blended_time_factor(upgrade: f32, blend: f32, target_ms: i32, base_ms: f32) -> f32 {
++    if blend <= 0.0 || target_ms <= 0 || base_ms <= 0.0 {
++        return upgrade;
++    }
++    let want = target_ms as f32 / base_ms;
++    (upgrade + (want - upgrade) * blend.min(1.0)).clamp(0.1, 20.0)
++}
++
++/// MW2's time from one trigger pull to the next: a burst gun's whole burst plus its cooldown.
++fn fire_cycle_ms(facts: &WeaponCombatFacts) -> f32 {
++    let burst = facts.fire_type >= 2 && facts.fire_type <= 4;
++    if burst {
++        (facts.fire_time_ms * facts.fire_type + facts.burst_cooldown_ms) as f32
++    } else {
++        facts.fire_time_ms as f32
++    }
++}
++
++/// MW2's time to reload a full clip: a shotgun's shell by shell reload counted as a whole.
++fn full_reload_ms(facts: &WeaponCombatFacts) -> f32 {
++    if facts.segmented_reload {
++        let per = facts.reload_ammo_add.max(1);
++        let adds = (facts.clip_size.max(1) + per - 1) / per;
++        (facts.reload_start_time_ms + facts.reload_add_time_ms * adds + facts.reload_end_time_ms) as f32
++    } else {
++        facts.reload_time_ms as f32
++    }
 +}
 +
 +pub fn set_bridge_clip_size(weapon: u32, size: i32) {

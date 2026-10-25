@@ -31,6 +31,7 @@ namespace re4
     constexpr size_t Model_rno0    = 0xFC;  // uint8 routine: 0 init, 1 move, 2 damage, 3 die (cEm convention)
     constexpr size_t Model_id      = 0x100; // uint8 character type id
     constexpr size_t Em_hp         = 0x324; // int16
+    constexpr size_t Model_seqSpeed = 0x298; // float: animation speed, Motion_1D8.Seq_speed_C0 (re4_tweaks ModExpansion)
     constexpr size_t Em_dmgFlag    = 0x32C; // cDmgInfo.m_Flag_4: a hit waiting for the enemy to process
 
     // GLOBAL_WK, pointed to by pG (SDK/global.h)
@@ -43,6 +44,8 @@ namespace re4
     constexpr size_t G_curRoomId   = 0x4FAC; // uint16
     constexpr size_t G_plHp        = 0x4FB4; // int16
     constexpr size_t G_plHpMax     = 0x4FB6; // int16
+    constexpr size_t G_rankPoints  = 0x4F94; // int32: hidden difficulty rank points (re4_tweaks dynamicDifficultyPoints)
+    constexpr size_t G_rankLevel   = 0x4F98; // uint8: hidden difficulty rank 1-10
     constexpr size_t G_plType      = 0x4FC8; // uint8, 0 = Leon
     constexpr size_t G_plCostume   = 0x4FC9; // uint8, Leon: 0 jacket, 1 normal, 2 vest, 3 RPD, 4 mafia
     constexpr size_t G_statusFlags = 0x501C; // Flags_STATUS word 0

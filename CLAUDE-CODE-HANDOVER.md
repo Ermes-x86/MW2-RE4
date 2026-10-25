@@ -313,3 +313,29 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   falls back to Joy[0] (same addresses), optional hooks once after the required patterns, HookCall/HookThunk skip a
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
+
+## v45 (2026-10-25): one MW2 menu with tabs, balancing, FPS cap
+
+- **Menu**: F10 opens one menu with tabs Settings / Guns / Damage / Balancing / Controls (Q/E or Tab change tab,
+  Backspace or F10 closes). F8 opens the Guns tab (the old picker), F11 the Damage tab; F7 and F5 still toggle the
+  controls panel and the gun list, which are also Settings rows. The on-screen controls panel is short now and ends
+  with "F10 MW2 menu, F6 MW2 on / off"; a one-time notice on the first activation points to F10 (INI `MenuHint`).
+  E no longer presses RE4's use key while the menu is open (E = next tab).
+- **FPS cap** (Settings, INI `FpsCap` 0/30/60/120): with SyncFrames the plugin skips the tick event when a frame
+  comes sooner than 1/cap (FrameDue); 0 = one MW2 frame per RE4 frame. MW2 can never draw more than RE4's frames.
+- **Balancing** (INI `[Balancing]`, presets Off / Hard / Very hard / Custom):
+  - plugin only: enemy speed (Seq_speed at cModel+0x298 scaled for ordinary enemy ids, base re-taken when RE4 writes
+    its own value; bosses, animals, merchant 0x18, objects excluded), enemy damage (Leon's HP drop scaled in the
+    camera hook; extra damage never takes the last point), enemy toughness (LifeDownSet2 hook divides every hit on
+    ids 0x10-0x4F while MW2 mode is on), hidden rank held (G+0x4F94 = rank*1000+500, G+0x4F98 = rank).
+  - runtime (iw4l-source master 1733b04): block `Balance` at CameraOffset+64 (magic "BAL1"; free space before the
+    image; an old plugin leaves magic 0 = MW2's own): walk and aim-walk factors (CmdScaleWalkContext), sprint length
+    (0 = no sprint; min sprint time 0.4 x length), recoil (ps.recoil_scale + weap_flags RECOIL_SCALE, the scripts'
+    player_recoilScaleOn), spread (hip/ADS spread facts), fire/reload timing blended from MW2's time (with RE4's
+    upgrades) toward the RE4 gun's own time (plugin table kRe4GunTimes = the merchant's FIRING SPEED / RELOAD SPEED
+    from evilresource.com; burst = whole burst + cooldown, segmented reload = full clip). Viewmodel: a slower fire
+    keeps MW2's fire animation, a slower reload stretches it (max 3x).
+  - Not done: flinch limit (RE4 applies damage and reaction together; the target is only known inside BulletHit).
+- Deployed 2026-10-25 for in-game test: plugin builds\MW2RE4.v45.asi, runtime iw4l-runtime\iw4l-re4.exe (= runtime-build
+  1733b04). Backups `Bin32\MW2RE4.before-v45-20261025-180322.asi.bak` / `.ini.bak`,
+  `iw4l-runtime\iw4l-re4.before-v45-20261025-180322.exe`. README not updated yet (do it with the release).

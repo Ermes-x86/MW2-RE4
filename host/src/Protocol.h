@@ -59,6 +59,15 @@ struct GuestCamera {
  uint32_t sequence;
 };
 static_assert(sizeof(GuestCamera)==64);
+// MW2-RE4 balancing menu, right after the guest camera (free space before the image). Percentages: 100 = MW2's
+// own; sprintMs 0xFFFF = MW2's own sprint, 0 = none; fireMs/reloadMs = the RE4 gun's times (0 = unknown).
+constexpr uint32_t BalanceOffset=CameraOffset+64, BalanceMagic=0x314C4142;
+struct Balance {
+ uint32_t magic;
+ uint16_t walk,adsWalk,sprintMs,spread,recoil,fireBlend,reloadBlend,fireMs,reloadMs,padding;
+ uint32_t reserved[10];
+};
+static_assert(sizeof(Balance)==64 && BalanceOffset+64<=FrameOffset);
 struct Shot {
  uint32_t sequence,weapon;
  float origin[3],direction[3];
