@@ -194,12 +194,12 @@ struct Settings
     int syncFrames = 1;        // MW2 draws one frame per RE4 frame (0 = its own 60 fps timer; takes effect at start)      // the merchant always shows the MW2 name of each RE4 gun (F5 hides it there)
     int damageTrace = 0; // research: log which RE4 code writes enemy damage/HP (RE4 mode only)
     int grenadeTrace = 0; // research: log RE4's own effect / sound / blast calls while MW2 is off
-    int incendiary = 0;   // MW2's frag (G) throws RE4's incendiary grenades instead of hand grenades (F8)
+    int incendiary = 0;   // MW2's frag (G) throws RE4's incendiary grenades instead of hand grenades (Guns tab)
     float promptRaise = 200.f; // RE4 2D units the "press ... to" prompts move up while MW2 has control
     float messageRaise = 150.f; // RE4 screen units captions ("Will you use the emblem?") move up while MW2 has control
-    // Damage multiplier per MW2 gun class (F11), applied to the damage RE4 computes for the class's RE4 gun
+    // Damage multiplier per MW2 gun class (Damage tab), applied to the damage RE4 computes for the class's RE4 gun
     float damage[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
-    int re4Inventory = 1;      // MW2's gun and ammo come from Leon's attache case (0 = MW2's own, F8 menu)
+    int re4Inventory = 1;      // MW2's gun and ammo come from Leon's attache case (0 = MW2's own, Guns tab)
     int infiniteAmmo = 0;      // keep MW2's reserve ammo topped up (MW2's own resupply)
     int skin = 0;              // index into kSkins: the MW2 map whose soldier kit (arms) MW2 uses
     int resolution = 2;        // index into kResolutions: the size MW2 renders at
@@ -219,15 +219,15 @@ struct BalanceCfg
     int reloadTiming = 0;    // % of the way from MW2's reload time to the RE4 gun's
     int walk = 100;          // % MW2 movement speed
     int sprint = 4;          // index into kSprintMs
-    int adsWalk = 100;       // % movement speed while aiming down the sights
-    float recoil = 1.f;      // recoil and bullet spread
+    int adsMove = 1;         // 0 = Leon stands still while aiming down the sights (like RE4)
+    int adsWalk = 100;       // % movement speed while aiming down the sights (when adsMove)
 } g_bal;
 const char* kPresetNames[] = { "OFF (normal)", "HARD", "VERY HARD", "CUSTOM" };
 constexpr int kPresetCustom = 3;
 const BalanceCfg kPresets[] = {
-    { 0, 100, 1.f, 1.f, 0, 0, 0, 100, 4, 100, 1.f },
-    { 1, 115, 1.5f, 1.25f, 10, 50, 50, 85, 2, 60, 1.5f },
-    { 2, 130, 2.f, 1.5f, 10, 100, 100, 75, 0, 45, 2.f },
+    { 0, 100, 1.f, 1.f, 0, 0, 0, 100, 4, 1, 100 },
+    { 1, 115, 1.5f, 1.25f, 10, 50, 50, 85, 2, 1, 60 },
+    { 2, 130, 2.f, 1.5f, 10, 100, 100, 75, 0, 0, 60 },
 };
 const uint16_t kSprintMs[] = { 0, 1500, 2000, 3000, 0xFFFF };
 const char* kSprintNames[] = { "OFF", "1.5 s", "2 s", "3 s", "NORMAL (4 s)" };
@@ -324,7 +324,7 @@ void LoadSettings()
         return std::clamp((float)atof(buf), lo, hi);
     };
     g_bal.preset = balInt("Preset", 0, 0, kPresetCustom);
-    g_bal.enemySpeed = balInt("EnemySpeed", 100, 100, 150);
+    g_bal.enemySpeed = balInt("EnemySpeed", 100, 100, 200);
     g_bal.enemyDamage = balFloat("EnemyDamage", 1.f, .5f, 3.f);
     g_bal.toughness = balFloat("EnemyToughness", 1.f, .5f, 3.f);
     g_bal.rank = balInt("Rank", 0, 0, 10);
@@ -332,12 +332,13 @@ void LoadSettings()
     g_bal.reloadTiming = balInt("ReloadTiming", 0, 0, 100);
     g_bal.walk = balInt("WalkSpeed", 100, 50, 100);
     g_bal.sprint = balInt("Sprint", 4, 0, kSprintCount - 1);
+    g_bal.adsMove = balInt("MoveWhileAiming", 1, 0, 1);
     g_bal.adsWalk = balInt("AimWalkSpeed", 100, 30, 100);
-    g_bal.recoil = balFloat("Recoil", 1.f, 1.f, 3.f);
     Log("balancing: preset %s, enemy speed %d%%, enemy damage x%.2f, toughness x%.2f, rank %d, fire timing %d%%, "
-        "reload timing %d%%, walk %d%%, sprint %s, aim walk %d%%, recoil x%.1f, FPS cap %d",
+        "reload timing %d%%, walk %d%%, sprint %s, move while aiming %s, aim walk %d%%, FPS cap %d",
         kPresetNames[g_bal.preset], g_bal.enemySpeed, g_bal.enemyDamage, g_bal.toughness, g_bal.rank, g_bal.fireTiming,
-        g_bal.reloadTiming, g_bal.walk, kSprintNames[g_bal.sprint], g_bal.adsWalk, g_bal.recoil, g_cfg.fpsCap);
+        g_bal.reloadTiming, g_bal.walk, kSprintNames[g_bal.sprint], g_bal.adsMove ? "yes" : "no", g_bal.adsWalk,
+        g_cfg.fpsCap);
     Log("settings: RuntimeDir=%s RuntimeExecutable=%s RuntimeSettings=%s MappingName=%s ToggleKey=0x%X FOV=%.1f "
         "UnitsPerMeter=%.1f MouseScale=%.2f CollisionRadius=%.1f HideLeon=%d InvertMouseY=%d",
         g_cfg.runtimeDir.c_str(), g_cfg.runtimeExe.c_str(), g_cfg.settingsFile.c_str(), g_cfg.mappingName.c_str(),
@@ -555,7 +556,7 @@ bool g_sceneOverflow = false;
 uint32_t g_savedStop = 0, g_savedDisp = 0;
 bool g_keyWasDown = false;
 bool g_helpKeyWasDown = false;
-// Weapon menu (F8): MW2's own catalog, filtered to what fits RE4. F9 refills ammo. With Re4Inventory=1 it picks
+// Weapon menu (Guns tab): MW2's own catalog, filtered to what fits RE4. F9 refills ammo. With Re4Inventory=1 it picks
 // which MW2 gun stands for the RE4 gun Leon has equipped (saved to [Guns]); ammo stays RE4's.
 Features g_features{};
 std::vector<CatalogEntry> g_catalog;   // filtered, as shown
@@ -563,7 +564,7 @@ std::vector<CatalogEntry> g_catalogAll; // everything MW2 sent, for naming shots
 uint32_t g_catalogSource = 0;          // MW2 catalog size the filtered list was built from
 bool MenuOpen();
 size_t g_selected = 0;
-std::vector<size_t> g_pickList; // Re4Inventory=1: the g_catalog guns the F8 picker offers
+std::vector<size_t> g_pickList; // Re4Inventory=1: the g_catalog guns the Guns tab offers
 bool PickerStart();
 void PickerApply(size_t entry);
 std::string PickerTitle();
@@ -1143,7 +1144,7 @@ bool StartsWithAny(const char* name, std::initializer_list<const char*> prefixes
     return false;
 }
 
-// MW2 gun classes (F11 sliders). Each class hits through the RE4 gun whose reactions fit (shotgun knockback,
+// MW2 gun classes (Damage tab sliders). Each class hits through the RE4 gun whose reactions fit (shotgun knockback,
 // rifle hits); its damage is then scaled by the class's slider in LifeDownHook.
 enum GunClass { GC_PISTOL, GC_TOUGH_PISTOL, GC_SMG, GC_RIFLE, GC_SHOTGUN, GC_SNIPER, GC_COUNT, GC_OTHER = GC_COUNT };
 const char* kGunClassNames[GC_COUNT] = { "NORMAL PISTOLS", "TOUGH PISTOLS", "SMGS", "ASSAULT RIFLES", "12 GAUGE",
@@ -1601,7 +1602,6 @@ void Restore();
 // ---------------------------------------------------------------- MW2 menu (F10): one menu, five tabs
 // Settings, Guns (the MW2 gun for each RE4 gun), Damage (per gun class), Balancing (difficulty) and Controls.
 // Q/E or Tab change the tab, Up/Down choose a row, Left/Right change it, Enter uses it, F10 or Backspace close.
-// The old keys still open their tab: F8 Guns, F11 Damage.
 enum MenuTab { TAB_SETTINGS, TAB_GUNS, TAB_DAMAGE, TAB_BALANCING, TAB_CONTROLS, TAB_COUNT };
 const char* kTabNames[TAB_COUNT] = { "SETTINGS", "GUNS", "DAMAGE", "BALANCING", "CONTROLS" };
 bool g_menuOpen = false;
@@ -1643,8 +1643,8 @@ void SaveBalancing()
     put("ReloadTiming", "%.0f", g_bal.reloadTiming);
     put("WalkSpeed", "%.0f", g_bal.walk);
     put("Sprint", "%.0f", g_bal.sprint);
+    put("MoveWhileAiming", "%.0f", g_bal.adsMove);
     put("AimWalkSpeed", "%.0f", g_bal.adsWalk);
-    put("Recoil", "%.1f", g_bal.recoil);
 }
 
 std::string Bar(float frac, int width = 20)
@@ -1827,8 +1827,8 @@ const char* kBalanceHints[kBalanceRows] = {
     "0% = MW2's reload, 100% = the RE4 gun's (the merchant's RELOAD SPEED, upgrades count).",
     "MW2 movement speed.",
     "How long you can sprint before MW2 makes you stop and recover.",
-    "Movement speed while aiming down the sights.",
-    "MW2 recoil, and bullet spread (half as strong).",
+    "NO = you stand still while aiming down the sights, like Leon in RE4.",
+    "Movement speed while aiming down the sights (when MOVE WHILE AIMING is YES).",
 };
 
 void ApplyPreset(int preset)
@@ -1852,7 +1852,7 @@ void BalancingInput(bool up, bool down, int dir)
     switch (g_balanceRow)
     {
     case 0: ApplyPreset((g_bal.preset + kPresetCustom + 1 + dir) % (kPresetCustom + 1)); break;
-    case 1: stepI(g_bal.enemySpeed, 5, 100, 150); break;
+    case 1: stepI(g_bal.enemySpeed, 5, 100, 200); break;
     case 2: stepF(g_bal.enemyDamage, .25f, .5f, 3.f); break;
     case 3: stepF(g_bal.toughness, .25f, .5f, 3.f); break;
     case 4: stepI(g_bal.rank, 1, 0, 10); break;
@@ -1860,8 +1860,8 @@ void BalancingInput(bool up, bool down, int dir)
     case 6: stepI(g_bal.reloadTiming, 10, 0, 100); break;
     case 7: stepI(g_bal.walk, 5, 50, 100); break;
     case 8: stepI(g_bal.sprint, 1, 0, kSprintCount - 1); break;
-    case 9: stepI(g_bal.adsWalk, 5, 30, 100); break;
-    case 10: stepF(g_bal.recoil, .1f, 1.f, 3.f); break;
+    case 9: g_bal.adsMove = !g_bal.adsMove; break;
+    case 10: stepI(g_bal.adsWalk, 5, 30, 100); break;
     }
     if (g_balanceRow != 0)
         g_bal.preset = kPresetCustom;
@@ -1876,7 +1876,7 @@ std::string BalancingText()
     else
         snprintf(rank, sizeof(rank), "RE4'S OWN");
     snprintf(rows[0], 160, "PRESET               < %s >", kPresetNames[g_bal.preset]);
-    snprintf(rows[1], 160, "ENEMY SPEED          %s  %d%%", Bar((g_bal.enemySpeed - 100) / 50.f).c_str(), g_bal.enemySpeed);
+    snprintf(rows[1], 160, "ENEMY SPEED          %s  %d%%", Bar((g_bal.enemySpeed - 100) / 100.f).c_str(), g_bal.enemySpeed);
     snprintf(rows[2], 160, "ENEMY DAMAGE         %s  x%.2f", Bar((g_bal.enemyDamage - .5f) / 2.5f).c_str(), g_bal.enemyDamage);
     snprintf(rows[3], 160, "ENEMY TOUGHNESS      %s  x%.2f", Bar((g_bal.toughness - .5f) / 2.5f).c_str(), g_bal.toughness);
     snprintf(rows[4], 160, "HIDDEN RANK          < %s >", rank);
@@ -1884,8 +1884,9 @@ std::string BalancingText()
     snprintf(rows[6], 160, "RELOAD TIMING        %s  %d%% RE4", Bar(g_bal.reloadTiming / 100.f).c_str(), g_bal.reloadTiming);
     snprintf(rows[7], 160, "WALKING SPEED        %s  %d%%", Bar((g_bal.walk - 50) / 50.f).c_str(), g_bal.walk);
     snprintf(rows[8], 160, "SPRINT               < %s >", kSprintNames[g_bal.sprint]);
-    snprintf(rows[9], 160, "SPEED WHILE AIMING   %s  %d%%", Bar((g_bal.adsWalk - 30) / 70.f).c_str(), g_bal.adsWalk);
-    snprintf(rows[10], 160, "RECOIL AND SPREAD    %s  x%.1f", Bar((g_bal.recoil - 1.f) / 2.f).c_str(), g_bal.recoil);
+    snprintf(rows[9], 160, "MOVE WHILE AIMING    < %s >", g_bal.adsMove ? "YES" : "NO");
+    snprintf(rows[10], 160, "SPEED WHILE AIMING   %s  %d%%%s", Bar((g_bal.adsWalk - 30) / 70.f).c_str(), g_bal.adsWalk,
+             g_bal.adsMove ? "" : "  (off)");
     std::string t;
     for (int i = 0; i < kBalanceRows; ++i)
     {
@@ -1991,21 +1992,15 @@ std::string MenuText()
 
 void MenuInput(bool focused)
 {
-    bool f8 = Edge(VK_F8), f9 = Edge(VK_F9), up = Edge(VK_UP), down = Edge(VK_DOWN), left = Edge(VK_LEFT),
+    bool f9 = Edge(VK_F9), up = Edge(VK_UP), down = Edge(VK_DOWN), left = Edge(VK_LEFT),
          right = Edge(VK_RIGHT), enter = Edge(VK_RETURN), back = Edge(VK_BACK), f10 = Edge(VK_F10),
-         f11 = Edge(VK_F11), q = Edge('Q'), e = Edge('E'), tab = Edge(VK_TAB);
+         q = Edge('Q'), e = Edge('E'), tab = Edge(VK_TAB);
     InfiniteAmmo();
     if (!g_active || !focused)
     {
         g_menuOpen = false;
         return;
     }
-    auto toggle = [](int tabIndex) {
-        if (g_menuOpen && g_menuTab == tabIndex)
-            g_menuOpen = false;
-        else
-            OpenMenu(tabIndex);
-    };
     if (f10)
     {
         if (g_menuOpen)
@@ -2013,10 +2008,6 @@ void MenuInput(bool focused)
         else
             OpenMenu(g_menuTab);
     }
-    else if (f11)
-        toggle(TAB_DAMAGE);
-    else if (f8)
-        toggle(TAB_GUNS);
     if (f9)
     {
         if (g_cfg.re4Inventory)
@@ -2300,7 +2291,7 @@ struct Arsenal
     DWORD runtimeStarted = 0;
     DWORD gunMismatchSince = 0, fragMismatchSince = 0, flashMismatchSince = 0; // self-correction timers
     std::string missing;        // MW2 gun name not in MW2's catalog (logged once)
-    bool remap = false;         // the F8 picker changed the MW2 gun for the equipped RE4 gun: arm it again
+    bool remap = false;         // the Guns tab changed the MW2 gun for the equipped RE4 gun: arm it again
 } g_arm;
 
 // RE4's own time between shots and full reload time of the equipped gun at its upgrade levels (the merchant's
@@ -2383,7 +2374,7 @@ std::string PickerTitle()
     return g_arm.gun >= 0 && g_arm.item ? "MW2 GUN FOR: " + Upper(kGuns[g_arm.gun].label) : "GRENADE (G)";
 }
 
-// F8 with Re4Inventory=1: the two grenade rows, then MW2's guns (no grenades or equipment) for the RE4 gun Leon
+// Guns tab with Re4Inventory=1: the two grenade rows, then MW2's guns (no grenades or equipment) for the RE4 gun Leon
 // has equipped (guns only when one is equipped).
 bool PickerStart()
 {
@@ -2746,7 +2737,7 @@ void ArsenalUpdate(bool focused)
     }
 
     // 3. Grenades.
-    // MW2's frag is the grenade type chosen in the F8 picker (hand grenades or incendiaries); when the case has
+    // MW2's frag is the grenade type chosen in the Guns tab (hand grenades or incendiaries); when the case has
     // none of that type but has the other, G throws the other (the pick comes back once the case has it again).
     // Not switched while a throw is still to be taken from the case, so it is taken from the type it was thrown as.
     if (g_arm.frag < 0 || g_features.lethalAmmo >= g_arm.frag)
@@ -3175,10 +3166,10 @@ void Exchange(uint8_t* g, uint8_t* pl)
     Balance balance = {};
     balance.magic = BalanceMagic;
     balance.walk = (uint16_t)g_bal.walk;
-    balance.adsWalk = (uint16_t)g_bal.adsWalk;
+    balance.adsWalk = (uint16_t)(g_bal.adsMove ? g_bal.adsWalk : 0);
     balance.sprintMs = kSprintMs[g_bal.sprint];
-    balance.recoil = (uint16_t)std::lround(g_bal.recoil * 100.f);
-    balance.spread = (uint16_t)std::lround((1.f + (g_bal.recoil - 1.f) * .5f) * 100.f);
+    balance.recoil = 100;
+    balance.spread = 100;
     balance.fireBlend = (uint16_t)g_bal.fireTiming;
     balance.reloadBlend = (uint16_t)g_bal.reloadTiming;
     Re4GunTimes(&balance.fireMs, &balance.reloadMs);

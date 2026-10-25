@@ -578,7 +578,7 @@ index a8620ac..981e5b3 100644
  assets.workspace = true
  audio.workspace = true
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..7a2e098 100644
+index 32839dd..546f63a 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
 @@ -125,6 +125,46 @@ struct GuestCamera {
@@ -614,7 +614,7 @@ index 32839dd..7a2e098 100644
 +        let pct = |v: u16, lo: f32, hi: f32| (f32::from(v) / 100.0).clamp(lo, hi);
 +        sim::BridgeBalance {
 +            walk: pct(self.walk, 0.3, 1.5),
-+            ads_walk: pct(self.ads_walk, 0.2, 1.0),
++            ads_walk: pct(self.ads_walk, 0.0, 1.0),
 +            sprint_ms: if self.sprint_ms == 0xFFFF { -1 } else { i32::from(self.sprint_ms.min(8000)) },
 +            spread: pct(self.spread, 0.5, 4.0),
 +            recoil: i32::from(self.recoil.clamp(50, 400)),
@@ -1716,10 +1716,10 @@ index 441a3c5..513d45d 100644
  
              sprint_forward_minimum: 105,
 diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
-index e9ac812..351f16f 100644
+index e9ac812..c2eb63c 100644
 --- a/crates/sim/src/world.rs
 +++ b/crates/sim/src/world.rs
-@@ -1038,12 +1038,61 @@ impl SimState {
+@@ -1038,12 +1038,62 @@ impl SimState {
      }
  
      pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
@@ -1736,7 +1736,8 @@ index e9ac812..351f16f 100644
 +        if clip != 0 && (clip >> 32) as u32 == weapon && facts.clip_size > 0 {
 +            facts.clip_size = clip as u32 as i32;
 +        }
-+        if clip != 0 && (clip >> 32) as u32 == weapon {
++        let bridged = weapon != 0 && BRIDGE_WEAPON.load(std::sync::atomic::Ordering::Relaxed) == weapon;
++        if bridged {
 +            let (fire, reload) = bridge_upgrade_timing();
 +            let balance = bridge_balance();
 +            let fire = blended_time_factor(fire, balance.fire_blend, balance.fire_ms, fire_cycle_ms(&facts));
@@ -1783,7 +1784,7 @@ index e9ac812..351f16f 100644
      }
  
      pub(crate) fn can_transition_weapon(&self, from: u32, to: u32) -> bool {
-@@ -3423,3 +3472,121 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
+@@ -3423,3 +3473,129 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
      ps.corpse_index = -1;
      ps
  }
@@ -1825,7 +1826,7 @@ index e9ac812..351f16f 100644
 +pub struct BridgeBalance {
 +    /// Movement speed factor.
 +    pub walk: f32,
-+    /// Further movement factor while aiming down the sights (blended by the ADS fraction).
++    /// Further movement factor while aiming down the sights (blended by the ADS fraction); 0 = stand still.
 +    pub ads_walk: f32,
 +    /// Sprint length in ms; 0 = no sprinting, negative = MW2's own (4 s).
 +    pub sprint_ms: i32,
@@ -1901,7 +1902,15 @@ index e9ac812..351f16f 100644
 +    }
 +}
 +
++/// RE4 bridge: the host's equipped gun, whose times the upgrades and the balancing menu change (also with
++/// unlimited ammo, which has no clip size); 0 = none.
++static BRIDGE_WEAPON: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++
 +pub fn set_bridge_clip_size(weapon: u32, size: i32) {
 +    let value = if size > 0 { (u64::from(weapon) << 32) | u64::from(size as u32) } else { 0 };
 +    BRIDGE_CLIP_SIZE.store(value, std::sync::atomic::Ordering::Relaxed);
++    if BRIDGE_WEAPON.swap(weapon, std::sync::atomic::Ordering::Relaxed) != weapon {
++        // the last gun's factors must not scale the new gun's animations
++        BRIDGE_EFFECTIVE_TIMING.store(0, std::sync::atomic::Ordering::Relaxed);
++    }
 +}

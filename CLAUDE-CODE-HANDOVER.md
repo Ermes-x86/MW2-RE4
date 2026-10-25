@@ -314,6 +314,19 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
 
+## v46 (2026-10-25): fire timing fix, move-while-aiming toggle, F8/F11 removed
+
+- User test of v45: menus and balancing work, but fire timing did nothing / "stuck". Cause: with unlimited ammo
+  (Infinite Ammo, or an exclusive upgrade) the plugin arms with clip size 0, and the runtime applied all timing
+  (upgrades and balancing) only when BRIDGE_CLIP_SIZE matched the gun; BRIDGE_EFFECTIVE_TIMING also stayed at the
+  last gun's factors (animations). Fix (sim/world.rs): new BRIDGE_WEAPON static set by set_bridge_clip_size for any
+  size; combat_facts_for scales timing when the weapon is BRIDGE_WEAPON; changing gun resets the effective factors.
+- Recoil / spread row removed (plugin sends 100 / 100; runtime support kept). INI `Recoil` ignored.
+- New Balancing row MOVE WHILE AIMING (INI `MoveWhileAiming` 1/0): NO sends adsWalk 0, runtime clamp now 0.0-1.0,
+  so full ADS = no movement (blended by f_weapon_pos_frac). Very hard preset = NO.
+- Enemy speed max 200% (was 150). v45 log showed x1.50 held on 12-16 enemies with 0 RE4 rewrites of Seq_speed.
+- F8 / F11 shortcuts removed: only F10 opens the menu (F9 refill kept, it is not a menu). README still lists F8/F11.
+
 ## v45 (2026-10-25): one MW2 menu with tabs, balancing, FPS cap
 
 - **Menu**: F10 opens one menu with tabs Settings / Guns / Damage / Balancing / Controls (Q/E or Tab change tab,
