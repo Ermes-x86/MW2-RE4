@@ -115,21 +115,56 @@ prepares MW2 assets and takes about a minute.
 | V | Melee |
 | E | RE4's action button: doors, items, ladders, jumps, the merchant |
 | RE4 keys | Attache case, map, menus and Ashley's commands work as in RE4 |
+| F10 | The MW2 menu (see below) |
 | F5 | Show or hide the RE4 -> MW2 gun list in the case and at the merchant |
 | F7 | Show or hide the controls panel |
-| F8 | Pick which MW2 gun stands for the RE4 gun Leon has equipped (saved to `[Guns]`; ammo stays RE4's) |
-| F10 | Settings: field of view, mouse sensitivity, infinite ammo, MW2 character skin, MW2 resolution |
-| F11 | Gun damage multipliers per class (1.0 = exactly the RE4 gun's damage) |
+
+### The MW2 menu (F10)
+
+One menu with five tabs. **Q / E** (or Tab) change the tab, **Up / Down**
+choose a row, **Left / Right** change it, **Enter** uses it, **F10** or
+**Backspace** closes it. Everything is saved to `Resident Evil 4\Bin32\MW2RE4.ini`.
+
+| Tab | What it has |
+|---|---|
+| Settings | Field of view, mouse sensitivity, infinite ammo, MW2 character skin, MW2 resolution, FPS cap, controls panel, gun list, restart MW2 |
+| Guns | Which MW2 gun stands for the RE4 gun Leon has equipped (ammo stays RE4's) |
+| Damage | Gun damage multipliers per class (1.0 = exactly the RE4 gun's damage) |
+| Balancing | Difficulty settings to make MW2's speed fair against RE4 (below) |
+| Controls | The full key list |
 
 **MW2 resolution.** MW2's gun and HUD are drawn at 960x540 by default and
-stretched to RE4's screen. In F10, set MW2 RESOLUTION from 640x360 (fastest)
-to 1280x720 (sharpest), then select RESTART MW2 NOW and press Enter. It is
-saved as `Resolution=` in `MW2RE4.ini`. Choose a lower one if the game
-stutters.
+stretched to RE4's screen. In Settings, set MW2 RESOLUTION from 640x360
+(fastest) to 1280x720 (sharpest), then select RESTART MW2 NOW and press Enter.
+Choose a lower one if the game stutters.
 
-Which MW2 gun each RE4 gun becomes can be changed in game with F8 (equip the
-RE4 gun, press F8, pick an MW2 gun, Enter) or in the `[Guns]` section of
-`Resident Evil 4\Bin32\MW2RE4.ini`.
+**FPS cap.** MW2 draws one frame per RE4 frame. With a 120 fps mod for RE4,
+the FPS cap (30 / 60 / 120) limits how often MW2 draws. MW2 can never draw
+more frames than RE4.
+
+**Infinite ammo.** ON: the MW2 gun never runs dry and the case's ammo is not
+used up. OFF: ammo comes from Leon's attache case.
+
+**Balancing.** MW2 moves and shoots much faster than RE4 was made for. The
+presets OFF (normal), HARD and VERY HARD fill every row; changing a row makes
+it CUSTOM. All rows are off by default.
+
+| Row | What it does |
+|---|---|
+| Enemy speed | Ganados, zealots, soldiers, dogs, Garradors and Regenerators move and attack faster (up to 200%). Bosses keep their speed |
+| Enemy damage | Damage Leon takes. Extra damage never takes the last point of health; the next hit does |
+| Enemy toughness | Enemy health: every hit on an enemy is divided by this |
+| Hidden rank | Locks RE4's hidden difficulty (1-10: aggression, dodging, item drops). It is kept in your RE4 save |
+| Fire timing | 0% = MW2's fire rate, 100% = the RE4 gun's (the merchant's FIRING SPEED, upgrades count) |
+| Reload timing | 0% = MW2's reload, 100% = the RE4 gun's (the merchant's RELOAD SPEED, upgrades count) |
+| Walking speed | MW2 movement speed |
+| Sprint | Off, 1.5 s, 2 s, 3 s or normal (4 s) before MW2 makes you stop and recover |
+| Move while aiming | NO = you stand still while aiming down the sights, like Leon in RE4 |
+| Speed while aiming | Movement speed while aiming down the sights (when moving is allowed) |
+
+Which MW2 gun each RE4 gun becomes can be changed in the Guns tab (equip the
+RE4 gun, press F10, go to Guns, pick an MW2 gun, Enter) or in the `[Guns]`
+section of `MW2RE4.ini`.
 
 | RE4 gun | MW2 gun |
 |---|---|
