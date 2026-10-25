@@ -1664,6 +1664,7 @@ bool RestartNeeded()
 
 // ---- Settings tab
 constexpr int kSettingsRows = 9;
+void RearmGun();
 void SettingsInput(bool up, bool down, int dir, bool enter)
 {
     if (up) g_settingsRow = (g_settingsRow + kSettingsRows - 1) % kSettingsRows;
@@ -1687,10 +1688,11 @@ void SettingsInput(bool up, bool down, int dir, bool enter)
         }
         break;
     case 2:
-        if ((dir || enter) && !g_cfg.re4Inventory)
+        if (dir || enter)
         {
             g_cfg.infiniteAmmo = !g_cfg.infiniteAmmo;
             SaveSetting("InfiniteAmmo", "%.0f", g_cfg.infiniteAmmo);
+            RearmGun(); // unlimited clip, or the case's ammo again
         }
         break;
     case 3:
@@ -1762,8 +1764,7 @@ std::string SettingsText()
     char rows[kSettingsRows][160];
     snprintf(rows[0], 160, "FIELD OF VIEW        %s  %.0f", Bar((g_cfg.fov - 60.f) / 60.f).c_str(), g_cfg.fov);
     snprintf(rows[1], 160, "MOUSE SENSITIVITY    %s  %.1f", Bar((g_cfg.mouseScale - .1f) / 4.9f).c_str(), g_cfg.mouseScale);
-    snprintf(rows[2], 160, "INFINITE AMMO        %s", g_cfg.re4Inventory ? "-   (ammo comes from the attache case)"
-                                                      : g_cfg.infiniteAmmo ? "ON" : "OFF");
+    snprintf(rows[2], 160, "INFINITE AMMO        < %s >", g_cfg.infiniteAmmo ? "ON" : "OFF");
     snprintf(rows[3], 160, "SKIN                 < %s >", kSkins[g_cfg.skin].name);
     const Resolution& res = kResolutions[g_cfg.resolution];
     snprintf(rows[4], 160, "MW2 RESOLUTION       < %ux%u >%s", res.w, res.h,
@@ -2293,6 +2294,7 @@ struct Arsenal
     std::string missing;        // MW2 gun name not in MW2's catalog (logged once)
     bool remap = false;         // the Guns tab changed the MW2 gun for the equipped RE4 gun: arm it again
 } g_arm;
+void RearmGun() { g_arm.remap = true; }
 
 // RE4's own time between shots and full reload time of the equipped gun at its upgrade levels (the merchant's
 // FIRING SPEED and RELOAD SPEED, from evilresource.com's tables), in ms; 0 = unknown (rocket launcher).

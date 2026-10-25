@@ -314,6 +314,8 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
 
+## v47 (2026-10-25): Infinite Ammo row works again in RE4 mode (was locked while Re4Inventory=1, yet InfiniteAmmo=1 still applied); toggling re-arms the gun (RearmGun).
+
 ## v46 (2026-10-25): fire timing fix, move-while-aiming toggle, F8/F11 removed
 
 - User test of v45: menus and balancing work, but fire timing did nothing / "stuck". Cause: with unlimited ammo
