@@ -22,7 +22,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v44 (works next to re4_tweaks)";
+constexpr const char* kVersion = "MW2RE4 v47 (0.1.6-beta)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log

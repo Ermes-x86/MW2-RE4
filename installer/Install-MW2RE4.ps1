@@ -100,8 +100,9 @@ function Set-IniValue([string[]]$lines, [string]$key, [string]$value) {
         if ($line -match "^\s*$([regex]::Escape($key))\s*=") { $found = $true; "$key=$value" } else { $line }
     }
     if (-not $found) {
-        # new keys go at the end of the [MW2RE4] section, not after [Guns]
-        $at = [array]::FindIndex([string[]]$result, [Predicate[string]] { param($l) $l -match '^\s*\[Guns\]' })
+        # new keys go at the end of the [MW2RE4] section, before the next section ([Balancing], [Guns])
+        $start = [array]::FindIndex([string[]]$result, [Predicate[string]] { param($l) $l -match '^\s*\[MW2RE4\]' })
+        $at = [array]::FindIndex([string[]]$result, [int]($start + 1), [Predicate[string]] { param($l) $l -match '^\s*\[' })
         if ($at -lt 0) { $result = @($result) + "$key=$value" }
         else { $result = @($result[0..($at - 1)]) + "$key=$value" + @($result[$at..($result.Count - 1)]) }
     }
