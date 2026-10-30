@@ -578,10 +578,10 @@ index a8620ac..981e5b3 100644
  assets.workspace = true
  audio.workspace = true
 diff --git a/crates/bootstrap/src/gta_bridge.rs b/crates/bootstrap/src/gta_bridge.rs
-index 32839dd..546f63a 100644
+index 32839dd..562390a 100644
 --- a/crates/bootstrap/src/gta_bridge.rs
 +++ b/crates/bootstrap/src/gta_bridge.rs
-@@ -125,6 +125,46 @@ struct GuestCamera {
+@@ -125,6 +125,58 @@ struct GuestCamera {
      sequence: u32,
  }
  const _: () = assert!(size_of::<GuestCamera>() == 64);
@@ -603,6 +603,7 @@ index 32839dd..546f63a 100644
 +    fire_ms: u16,
 +    reload_ms: u16,
 +    padding: u16,
++    /// MW2-RE4 controller: [0] forward and [1] right (f32 bits, -1..1), [2] bit 1 = valid.
 +    reserved: [u32; 10],
 +}
 +const _: () = assert!(size_of::<Balance>() == 64 && BALANCE + 64 <= FRAME);
@@ -624,11 +625,22 @@ index 32839dd..546f63a 100644
 +            reload_ms: i32::from(self.reload_ms),
 +        }
 +    }
++    /// The host's left stick: forward and right, or zero when it sends none.
++    fn pad_move(self) -> [f32; 2] {
++        if self.magic != BALANCE_MAGIC || self.reserved[2] & 1 == 0 {
++            return [0.0; 2];
++        }
++        let axis = |bits: u32| {
++            let v = f32::from_bits(bits);
++            if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
++        };
++        [axis(self.reserved[0]), axis(self.reserved[1])]
++    }
 +}
  const _: () = assert!(size_of::<HostMovement>() == 48 && size_of::<GuestMovement>() == 64);
  #[repr(C)]
  #[derive(Clone, Copy, Default)]
-@@ -154,6 +194,7 @@ unsafe extern "system" {
+@@ -154,6 +206,7 @@ unsafe extern "system" {
          size: usize,
      ) -> *mut c_void;
      fn CreateMutexW(attributes: *const c_void, owner: i32, name: *const u16) -> *mut c_void;
@@ -636,7 +648,7 @@ index 32839dd..546f63a 100644
      fn WaitForSingleObject(handle: *mut c_void, timeout: u32) -> u32;
      fn ReleaseMutex(handle: *mut c_void) -> i32;
      fn UnmapViewOfFile(address: *const c_void) -> i32;
-@@ -185,6 +226,8 @@ struct Memory {
+@@ -185,6 +238,8 @@ struct Memory {
      control: usize,
      frame: usize,
      scene: usize,
@@ -645,7 +657,7 @@ index 32839dd..546f63a 100644
  }
  impl Drop for Memory {
      fn drop(&mut self) {
-@@ -193,6 +236,9 @@ impl Drop for Memory {
+@@ -193,6 +248,9 @@ impl Drop for Memory {
              for handle in [self.mapping, self.control, self.frame, self.scene] {
                  CloseHandle(handle as *mut c_void);
              }
@@ -655,7 +667,7 @@ index 32839dd..546f63a 100644
          }
      }
  }
-@@ -248,12 +294,15 @@ impl Memory {
+@@ -248,12 +306,15 @@ impl Memory {
                  }
                  return None;
              }
@@ -671,7 +683,24 @@ index 32839dd..546f63a 100644
              }))
          }
      }
-@@ -409,8 +458,15 @@ pub fn install(app: &mut App) {
+@@ -303,6 +364,8 @@ struct Bridge {
+     ghosts: Vec<u32>,
+     look_epoch: u32,
+     mouse_total: [f32; 2],
++    /// MW2-RE4: the host controller's left stick (forward, right).
++    pad_move: [f32; 2],
+     camera_sequence: u32,
+     features: features::State,
+     announcer: announcer::State,
+@@ -348,6 +411,7 @@ pub fn install(app: &mut App) {
+         ghosts: Vec::new(),
+         look_epoch: 0,
+         mouse_total: [0.0; 2],
++        pad_move: [0.0; 2],
+         camera_sequence: 0,
+         features: features::State::default(),
+         announcer: announcer::State::default(),
+@@ -409,8 +473,15 @@ pub fn install(app: &mut App) {
  }
  fn pace_runtime(mut bridge: ResMut<Bridge>) {
      bridge.sleep_timing = [0.0; 2];
@@ -689,7 +718,7 @@ index 32839dd..546f63a 100644
              16_667
          } else {
              66_667
-@@ -479,9 +535,22 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
+@@ -479,9 +550,24 @@ fn read_host(mut bridge: ResMut<Bridge>, mut exit: MessageWriter<AppExit>) {
          }
          bridge.host = unsafe { memory.read(HOST) };
          bridge.host_movement = unsafe { memory.read(HOST_MOVEMENT) };
@@ -698,7 +727,9 @@ index 32839dd..546f63a 100644
 +        // MW2-RE4: RE4's firing / reload speed upgrades of the equipped gun
 +        sim::set_bridge_timing(bridge.host_movement.reserved[4]);
 +        // MW2-RE4: the balancing menu (movement, sprint, recoil, spread, RE4 gun timing)
-+        sim::set_bridge_balance(unsafe { memory.read::<Balance>(BALANCE) }.to_sim());
++        let balance = unsafe { memory.read::<Balance>(BALANCE) };
++        sim::set_bridge_balance(balance.to_sim());
++        bridge.pad_move = balance.pad_move();
          bridge.host_lock = unsafe { memory.read(HOST_LOCK) };
          bridge.features.request = unsafe { memory.read(features::BASE) };
 -        bridge.announcer.request = unsafe { (memory.read(features::BASE + 48), memory.read(features::BASE + 52)) };
@@ -713,7 +744,16 @@ index 32839dd..546f63a 100644
          bridge.announcer.volume = unsafe { memory.read(features::BASE + 56) };
      }
      if let Some(_guard) = memory.lock_scene() {
-@@ -681,8 +750,8 @@ fn anchor_authority(
+@@ -616,6 +702,8 @@ fn host_keys(
+     };
+     bridge.mouse_total = total;
+     actions.pad_look_delta = [0.0; 2];
++    // MW2-RE4: analog movement from the host's controller (keys still add on top).
++    actions.pad_move = if live(&bridge.host) { bridge.pad_move } else { [0.0; 2] };
+ }
+ fn host_input(bridge: Res<Bridge>, mut input: ResMut<net::ClientCmdTemplate>) {
+     if !live(&bridge.host) {
+@@ -681,8 +769,8 @@ fn anchor_authority(
          let origin = ps.origin;
          let released = scene.release_traps(
              ps.origin,
@@ -724,7 +764,20 @@ index 32839dd..546f63a 100644
              0x0281_0011,
              &mut bridge.ghosts,
          );
-@@ -772,8 +841,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+@@ -744,8 +832,10 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
+     } else {
+         0
+     };
+-    let forward = f32::from(keys & 16 != 0) - f32::from(keys & 32 != 0);
+-    let side = f32::from(keys & 128 != 0) - f32::from(keys & 64 != 0);
++    let stick = if live(&bridge.host) { bridge.pad_move } else { [0.0; 2] };
++    let push = |v: f32| if v.abs() >= 0.5 { v.signum() } else { 0.0 };
++    let forward = (f32::from(keys & 16 != 0) - f32::from(keys & 32 != 0) + push(stick[0])).clamp(-1.0, 1.0);
++    let side = (f32::from(keys & 128 != 0) - f32::from(keys & 64 != 0) + push(stick[1])).clamp(-1.0, 1.0);
+     if forward == 0.0 && side == 0.0 {
+         bridge.blocked = None;
+         return;
+@@ -772,8 +862,8 @@ fn unblock(bridge: &mut Bridge, world: &mut sim::SimWorld, local: sim::ClientId)
      direction = direction.map(|d| d / length);
      match scene.unblock_lift(
          ps.origin,
