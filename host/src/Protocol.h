@@ -65,7 +65,7 @@ constexpr uint32_t BalanceOffset=CameraOffset+64, BalanceMagic=0x314C4142;
 struct Balance {
  uint32_t magic;
  uint16_t walk,adsWalk,sprintMs,spread,recoil,fireBlend,reloadBlend,fireMs,reloadMs,padding;
- uint32_t reserved[10];
+ uint32_t reserved[10]; // [0] left stick forward, [1] right (float, -1..1), [2] 1 = stick valid (MW2-RE4 v48)
 };
 static_assert(sizeof(Balance)==64 && BalanceOffset+64<=FrameOffset);
 struct Shot {

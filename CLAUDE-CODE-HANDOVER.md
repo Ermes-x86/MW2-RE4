@@ -314,6 +314,22 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
 
+## v48 (2026-10-30): Xbox controller (XInput)
+- RE4 imports xinput1_3 XInputGetState by ordinal 2 (IAT 0x1710CA8). `HookXInput` points that import at `XInputGetStateHook`
+  (keeps whatever was there, e.g. another mod's hook). While `PadReadHook` filters RE4's keys (`g_padBlockRe4`), RE4 sees
+  only Start (pause); sticks, triggers and other buttons are zeroed. MW2 off/suspended = RE4 gets the whole pad.
+- `PollPad` once per frame in CameraSetHook (missing pad re-scanned every 2 s). Exchange maps RT fire, LT aim, X reload
+  (RE4 action prompt up: MW2 activate + RE4 use key), Y next gun, A jump, B crouch, D-pad down prone, RB frag, LB flash,
+  R3 melee, L3 sprint (latched while the stick stays forward). Right stick -> mouse counts (StickSpeed deg/s / 0.11 deg
+  per count at MW2 sensitivity 5, IW4 default curve, pitch x0.8). Left stick analog -> Balance.reserved[0..2]; the
+  runtime (gta_bridge.rs `Balance::pad_move`) feeds `actions.pad_move` and `unblock`.
+- PadReadHook presses RE4 keys for the pad: Back = KEY_SSCRN (case), D-pad left = KEY_ASHLEY, D-pad right = KEY_MAP,
+  X = KEY_USE (same path as E, incl. the action hand-over). UNVERIFIED which RE4 screen each bit opens.
+- Menu: D-pad up opens F10 menu; D-pad/A/B/LB/RB navigate; `g_padSwallow` stops the closing B/A from crouching/jumping.
+  L3+R3 held 0.6 s = F6. Settings rows 8 CONTROLLER, 9 STICK LOOK SPEED (restart row is now 10). INI Controller,
+  StickSpeed, InvertStickY. Help panel switches to controller text while a pad is connected.
+- Deployed plugin + runtime 2026-10-30 (backups before-v48-20261030-093122), untested.
+
 ## v47 (2026-10-25): Infinite Ammo row works again in RE4 mode (was locked while Re4Inventory=1, yet InfiniteAmmo=1 still applied); toggling re-arms the gun (RearmGun).
 
 ## v46 (2026-10-25): fire timing fix, move-while-aiming toggle, F8/F11 removed

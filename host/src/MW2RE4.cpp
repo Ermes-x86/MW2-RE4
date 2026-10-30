@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <d3dcompiler.h>
+#include <Xinput.h> // types only: XInputGetState is reached through RE4's own import
 #include <intrin.h>
 #include <algorithm>
 #include <cmath>
@@ -22,7 +23,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v47 (0.1.6-beta)";
+constexpr const char* kVersion = "MW2RE4 v48 (controller)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -205,6 +206,9 @@ struct Settings
     int resolution = 2;        // index into kResolutions: the size MW2 renders at
     int fpsCap = 0;            // most MW2 frames per second (30/60/120); 0 = one per RE4 frame (SyncFrames only)
     int menuHint = 0;          // 1 once the "press F10 for the menu" hint was shown
+    int controller = 1;        // an Xbox controller (XInput) plays MW2 while it has control
+    int stickSpeed = 220;      // degrees per second at full right-stick tilt (hip fire; aiming slows it)
+    int invertStickY = 0;
 } g_cfg;
 
 // Balancing menu (INI [Balancing]). A preset fills every value; changing one makes the preset Custom.
@@ -313,6 +317,9 @@ void LoadSettings()
             if (abs((int)kResolutions[i].w - (int)rw) < abs((int)kResolutions[g_cfg.resolution].w - (int)rw))
                 g_cfg.resolution = i;
     g_cfg.fpsCap = GetPrivateProfileIntA("MW2RE4", "FpsCap", g_cfg.fpsCap, path);
+    g_cfg.controller = GetPrivateProfileIntA("MW2RE4", "Controller", g_cfg.controller, path) != 0;
+    g_cfg.stickSpeed = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "StickSpeed", g_cfg.stickSpeed, path), 60, 600);
+    g_cfg.invertStickY = GetPrivateProfileIntA("MW2RE4", "InvertStickY", g_cfg.invertStickY, path) != 0;
     g_cfg.menuHint = GetPrivateProfileIntA("MW2RE4", "MenuHint", g_cfg.menuHint, path);
     auto balInt = [&](const char* key, int def, int lo, int hi) {
         return std::clamp((int)GetPrivateProfileIntA("Balancing", key, def, path), lo, hi);
@@ -1545,6 +1552,126 @@ bool Edge(int key)
     return result;
 }
 
+// ---------------------------------------------------------------- Xbox controller (XInput)
+// RE4 reads the pad through its xinput1_3 import XInputGetState (ordinal 2). While MW2 has control the plugin
+// reads the pad itself and hides it from RE4 (all but Start, RE4's pause), so the sticks, triggers and A/B/X/Y
+// never move Leon or open RE4 screens; Back, D-pad left/right and X press RE4's case, Ashley, map and action keys
+// for it (PadReadHook). Whenever MW2 steps aside, RE4 gets the whole pad again.
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+XInputGetStateFn g_xinputGet = nullptr; // what RE4's import pointed at before the hook (or xinput1_3 itself)
+volatile bool g_padBlockRe4 = false;    // set by PadReadHook while it filters RE4's keys
+bool g_padSwallow = false;              // ignore the pad's game buttons until all are released (after the menu)
+struct PadState
+{
+    bool connected = false;
+    WORD buttons = 0, prev = 0;
+    float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;
+    bool Down(WORD b) const { return connected && (buttons & b) != 0; }
+    bool Pressed(WORD b) const { return connected && (buttons & b) != 0 && !(prev & b); }
+} g_pad;
+DWORD g_padIndex = 0;
+
+DWORD WINAPI XInputGetStateHook(DWORD index, XINPUT_STATE* state)
+{
+    DWORD r = g_xinputGet ? g_xinputGet(index, state) : ERROR_DEVICE_NOT_CONNECTED;
+    if (r == ERROR_SUCCESS && state && g_padBlockRe4)
+    {
+        state->Gamepad.wButtons &= XINPUT_GAMEPAD_START;
+        state->Gamepad.bLeftTrigger = state->Gamepad.bRightTrigger = 0;
+        state->Gamepad.sThumbLX = state->Gamepad.sThumbLY = 0;
+        state->Gamepad.sThumbRX = state->Gamepad.sThumbRY = 0;
+    }
+    return r;
+}
+
+// Points RE4's XInputGetState import at XInputGetStateHook (another mod's hook there is kept and called).
+bool HookXInput()
+{
+    uint8_t* base = (uint8_t*)GetModuleHandleA(nullptr);
+    auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress)
+        return false;
+    for (auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); imp->Name; ++imp)
+    {
+        if (_strnicmp((const char*)(base + imp->Name), "xinput", 6) || !imp->OriginalFirstThunk)
+            continue;
+        auto names = (IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk);
+        auto slots = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++slots)
+        {
+            bool match = IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)
+                             ? IMAGE_ORDINAL(names->u1.Ordinal) == 2
+                             : !strcmp((const char*)((IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData))->Name,
+                                       "XInputGetState");
+            if (!match)
+                continue;
+            DWORD old;
+            if (!VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), PAGE_READWRITE, &old))
+                return false;
+            g_xinputGet = (XInputGetStateFn)(uintptr_t)slots->u1.Function;
+            slots->u1.Function = (DWORD)(uintptr_t)&XInputGetStateHook;
+            VirtualProtect(&slots->u1.Function, sizeof(slots->u1.Function), old, &old);
+            return true;
+        }
+    }
+    return false;
+}
+
+void Radial(float& x, float& y, float deadzone)
+{
+    float len = std::sqrt(x * x + y * y);
+    if (len <= deadzone)
+    {
+        x = y = 0;
+        return;
+    }
+    float k = std::min(1.f, (len - deadzone) / (1.f - deadzone)) / len;
+    x *= k;
+    y *= k;
+}
+
+// Once per RE4 frame (CameraSetHook). A port with no pad is slow to ask, so a missing pad is looked for every 2 s.
+void PollPad()
+{
+    WORD prev = g_pad.buttons;
+    bool was = g_pad.connected;
+    DWORD now = GetTickCount();
+    static DWORD nextScan = 0;
+    XINPUT_STATE s{};
+    bool ok = false;
+    if (g_cfg.controller && g_xinputGet && (was || now >= nextScan))
+    {
+        ok = g_xinputGet(g_padIndex, &s) == ERROR_SUCCESS;
+        for (DWORD i = 0; i < 4 && !ok && !was; ++i)
+            if (i != g_padIndex && g_xinputGet(i, &s) == ERROR_SUCCESS)
+            {
+                g_padIndex = i;
+                ok = true;
+            }
+        if (!ok)
+            nextScan = now + 2000;
+    }
+    if (ok != was)
+        Log(ok ? "controller: XInput pad %lu connected" : "controller: pad %lu gone", g_padIndex);
+    g_pad = {};
+    g_pad.prev = prev;
+    if (!ok)
+        return;
+    const XINPUT_GAMEPAD& p = s.Gamepad;
+    g_pad.connected = true;
+    g_pad.buttons = p.wButtons;
+    auto axis = [](SHORT v) { return std::max(-1.f, v / 32767.f); };
+    g_pad.lx = axis(p.sThumbLX);
+    g_pad.ly = axis(p.sThumbLY);
+    g_pad.rx = axis(p.sThumbRX);
+    g_pad.ry = axis(p.sThumbRY);
+    Radial(g_pad.lx, g_pad.ly, .24f);
+    Radial(g_pad.rx, g_pad.ry, .20f);
+    g_pad.lt = p.bLeftTrigger / 255.f;
+    g_pad.rt = p.bRightTrigger / 255.f;
+}
+
 void Notice(const std::string& text, DWORD ms = 3000)
 {
     g_notice = text;
@@ -1624,7 +1751,17 @@ const char* kControls =
     "\n"
     "F6   MW2 on / off\n"
     "F10  this menu\n"
-    "F7   controls panel on / off      F5  gun list in the case on / off";
+    "F7   controls panel on / off      F5  gun list in the case on / off\n"
+    "\n"
+    "XBOX CONTROLLER\n"
+    "Left stick  move        Right stick  look\n"
+    "RT  fire                LT  aim\n"
+    "A  jump                 B  crouch          D-pad down  prone\n"
+    "X  reload / use         Y  next gun        L3  sprint     R3  melee\n"
+    "RB  grenade             LB  tactical (flash)\n"
+    "Back  attache case      D-pad left  Ashley     D-pad right  map\n"
+    "D-pad up  this menu (D-pad, A, B, LB/RB)     Start  RE4 pause\n"
+    "L3 + R3 held  MW2 on / off";
 
 void SaveBalancing()
 {
@@ -1663,7 +1800,7 @@ bool RestartNeeded()
 }
 
 // ---- Settings tab
-constexpr int kSettingsRows = 9;
+constexpr int kSettingsRows = 11;
 void RearmGun();
 void SettingsInput(bool up, bool down, int dir, bool enter)
 {
@@ -1737,6 +1874,20 @@ void SettingsInput(bool up, bool down, int dir, bool enter)
         }
         break;
     case 8:
+        if (dir || enter)
+        {
+            g_cfg.controller = !g_cfg.controller;
+            SaveSetting("Controller", "%.0f", g_cfg.controller);
+        }
+        break;
+    case 9:
+        if (dir)
+        {
+            g_cfg.stickSpeed = std::clamp(g_cfg.stickSpeed + dir * 20, 60, 600);
+            SaveSetting("StickSpeed", "%.0f", g_cfg.stickSpeed);
+        }
+        break;
+    case 10:
         if (enter && RestartNeeded())
         {
             // MW2 loads the new map's soldiers and render size: restart it. RE4 keeps running; MW2 mode returns
@@ -1776,7 +1927,10 @@ std::string SettingsText()
         snprintf(rows[5], 160, "MW2 FPS CAP          < MATCH RE4 >  (one MW2 frame per RE4 frame)");
     snprintf(rows[6], 160, "CONTROLS PANEL       %s", g_cfg.showControls ? "ON" : "OFF");
     snprintf(rows[7], 160, "GUN LIST IN THE CASE %s", g_cfg.showGunList ? "ON" : "OFF");
-    snprintf(rows[8], 160, "%s", !RestartNeeded() ? "RESTART MW2          (not needed)"
+    snprintf(rows[8], 160, "CONTROLLER           < %s >%s", g_cfg.controller ? "ON" : "OFF",
+             !g_cfg.controller ? "" : g_pad.connected ? "  (connected)" : "  (none found)");
+    snprintf(rows[9], 160, "STICK LOOK SPEED     %s  %d", Bar((g_cfg.stickSpeed - 60) / 540.f).c_str(), g_cfg.stickSpeed);
+    snprintf(rows[10], 160, "%s", !RestartNeeded() ? "RESTART MW2          (not needed)"
                                                   : "RESTART MW2 NOW      Enter: applies skin and resolution (MW2 loads again)");
     std::string t;
     for (int i = 0; i < kSettingsRows; ++i)
@@ -1996,13 +2150,27 @@ void MenuInput(bool focused)
     bool f9 = Edge(VK_F9), up = Edge(VK_UP), down = Edge(VK_DOWN), left = Edge(VK_LEFT),
          right = Edge(VK_RIGHT), enter = Edge(VK_RETURN), back = Edge(VK_BACK), f10 = Edge(VK_F10),
          q = Edge('Q'), e = Edge('E'), tab = Edge(VK_TAB);
+    // Controller: D-pad up opens the menu; inside it D-pad moves, A selects, B closes, LB/RB change tabs.
+    bool pad = focused && g_pad.connected;
+    bool padOpen = pad && !g_menuOpen && g_pad.Pressed(XINPUT_GAMEPAD_DPAD_UP);
+    if (pad && g_menuOpen)
+    {
+        up |= g_pad.Pressed(XINPUT_GAMEPAD_DPAD_UP);
+        down |= g_pad.Pressed(XINPUT_GAMEPAD_DPAD_DOWN);
+        left |= g_pad.Pressed(XINPUT_GAMEPAD_DPAD_LEFT);
+        right |= g_pad.Pressed(XINPUT_GAMEPAD_DPAD_RIGHT);
+        enter |= g_pad.Pressed(XINPUT_GAMEPAD_A);
+        back |= g_pad.Pressed(XINPUT_GAMEPAD_B);
+        q |= g_pad.Pressed(XINPUT_GAMEPAD_LEFT_SHOULDER);
+        e |= g_pad.Pressed(XINPUT_GAMEPAD_RIGHT_SHOULDER);
+    }
     InfiniteAmmo();
     if (!g_active || !focused)
     {
         g_menuOpen = false;
         return;
     }
-    if (f10)
+    if (f10 || padOpen)
     {
         if (g_menuOpen)
             g_menuOpen = false;
@@ -2021,7 +2189,8 @@ void MenuInput(bool focused)
         // Left/Right held down repeats on the sliders
         static DWORD heldSince = 0, lastRepeat = 0;
         DWORD now = GetTickCount();
-        bool l = Down(VK_LEFT), r = Down(VK_RIGHT);
+        bool l = Down(VK_LEFT) || (pad && g_pad.Down(XINPUT_GAMEPAD_DPAD_LEFT)),
+             r = Down(VK_RIGHT) || (pad && g_pad.Down(XINPUT_GAMEPAD_DPAD_RIGHT));
         int dir = right ? 1 : left ? -1 : 0;
         if (dir)
             heldSince = lastRepeat = now;
@@ -2047,6 +2216,8 @@ void MenuInput(bool focused)
             case TAB_BALANCING: BalancingInput(up, down, dir); break;
             }
     }
+    if (g_menuOpen)
+        g_padSwallow = true; // the B or A that closes the menu must not also crouch or jump
     if (g_request && g_features.ack == g_request && g_noticeUntil &&
         (g_notice == "Equipping..." || g_notice == "Refilling ammo..."))
     {
@@ -3135,6 +3306,7 @@ void Exchange(uint8_t* g, uint8_t* pl)
     }
     g_host.velocity[0] = g_host.velocity[1] = g_host.velocity[2] = 0;
     g_host.buttons = 0;
+    bool padMove = false; // the left stick goes to MW2 (Balance reserved words)
     if (g_active && !MenuOpen() && Focused())
     {
         if (Down(VK_LBUTTON)) g_host.buttons |= 1;
@@ -3156,6 +3328,37 @@ void Exchange(uint8_t* g, uint8_t* pl)
         if (Down('E')) g_host.buttons |= 32768;
         g_mouseTotalX += g_mousePendingX * g_cfg.mouseScale;
         g_mouseTotalY -= g_mousePendingY * g_cfg.mouseScale * (g_cfg.invertMouseY ? -1.f : 1.f);
+        if (g_padSwallow && !g_pad.buttons && g_pad.lt < .3f && g_pad.rt < .3f)
+            g_padSwallow = false;
+        if (g_pad.connected && !g_padSwallow)
+        {
+            // X reloads, or uses while RE4's action prompt is up (PadReadHook presses RE4's use key)
+            bool prompt = g_actBtnActive && *g_actBtnActive;
+            // L3 starts a sprint that lasts while the left stick stays forward (as MW2 on consoles)
+            static bool sprint = false;
+            if (g_pad.Pressed(XINPUT_GAMEPAD_LEFT_THUMB))
+                sprint = true;
+            if (g_pad.ly < .5f || g_pad.lt > .3f || g_pad.rt > .3f)
+                sprint = false;
+            if (g_pad.rt > .3f) g_host.buttons |= 1;
+            if (g_pad.lt > .3f) g_host.buttons |= 2;
+            if (g_pad.Down(XINPUT_GAMEPAD_X)) g_host.buttons |= prompt ? 32768 : 4;
+            if (g_pad.Down(XINPUT_GAMEPAD_Y)) g_host.buttons |= 8;
+            if (sprint) g_host.buttons |= 256;
+            if (g_pad.Down(XINPUT_GAMEPAD_A)) g_host.buttons |= 512;
+            if (g_pad.Down(XINPUT_GAMEPAD_B)) g_host.buttons |= 1024;
+            if (g_pad.Down(XINPUT_GAMEPAD_DPAD_DOWN)) g_host.buttons |= 2048;
+            if (g_pad.Down(XINPUT_GAMEPAD_RIGHT_SHOULDER)) g_host.buttons |= 4096;
+            if (g_pad.Down(XINPUT_GAMEPAD_LEFT_SHOULDER)) g_host.buttons |= 8192;
+            if (g_pad.Down(XINPUT_GAMEPAD_RIGHT_THUMB)) g_host.buttons |= 16384;
+            // Right stick as mouse counts: MW2 sensitivity 5 turns 0.11 degrees per count, and MW2 slows it
+            // itself while aiming. Response curve as IW4's default pad curve.
+            auto curve = [](float v) { float a = std::fabs(v); return std::copysign(.35f * a + .65f * a * a * a, v); };
+            float counts = g_cfg.stickSpeed / .11f * g_host.dt;
+            g_mouseTotalX += curve(g_pad.rx) * counts;
+            g_mouseTotalY += curve(g_pad.ry) * counts * .8f * (g_cfg.invertStickY ? -1.f : 1.f);
+            padMove = true;
+        }
     }
     g_mousePendingX = g_mousePendingY = 0;
     g_hostMovement.tick = now;
@@ -3175,6 +3378,12 @@ void Exchange(uint8_t* g, uint8_t* pl)
     balance.fireBlend = (uint16_t)g_bal.fireTiming;
     balance.reloadBlend = (uint16_t)g_bal.reloadTiming;
     Re4GunTimes(&balance.fireMs, &balance.reloadMs);
+    if (padMove)
+    {
+        memcpy(&balance.reserved[0], &g_pad.ly, sizeof(float)); // forward
+        memcpy(&balance.reserved[1], &g_pad.lx, sizeof(float)); // right
+        balance.reserved[2] = 1;
+    }
     *(Balance*)(g_shared + BalanceOffset) = balance;
     c->host = g_host;
     c->hostMovement = g_hostMovement;
@@ -3265,6 +3474,7 @@ DWORD g_lastUse = 0; // when E was last pressed in MW2 mode
 void __cdecl PadReadHook()
 {
     g_padReadOrig();
+    g_padBlockRe4 = false; // RE4 sees the whole pad unless the filter below runs (applies at the next pad read)
     if (!g_active || !g_keyOn || !g_keyTrg)
         return;
     // A merchant, the case, a call or the game-over screen opened: RE4's camera stopped, so only here can
@@ -3297,7 +3507,23 @@ void __cdecl PadReadHook()
     uint64_t allowed = MenuOpen() ? 0 : re4::KEY_ALLOWED; // the menu owns arrows/Enter
     *g_keyOn &= allowed;
     *g_keyTrg &= allowed;
-    bool use = Focused() && Down('E') && !MenuOpen();
+    g_padBlockRe4 = g_cfg.controller != 0;
+    // Controller: RE4 no longer sees the pad, so its case, Ashley and map keys are pressed here
+    static WORD padPrev = 0;
+    WORD pad = g_pad.connected && Focused() && !MenuOpen() && !g_padSwallow ? g_pad.buttons : 0;
+    auto press = [&](WORD b, uint64_t key) {
+        if (pad & b)
+        {
+            *g_keyOn |= key;
+            if (!(padPrev & b))
+                *g_keyTrg |= key;
+        }
+    };
+    press(XINPUT_GAMEPAD_BACK, re4::KEY_SSCRN);
+    press(XINPUT_GAMEPAD_DPAD_LEFT, re4::KEY_ASHLEY);
+    press(XINPUT_GAMEPAD_DPAD_RIGHT, re4::KEY_MAP);
+    padPrev = pad;
+    bool use = Focused() && !MenuOpen() && (Down('E') || (pad & XINPUT_GAMEPAD_X));
     if (use)
     {
         *g_keyOn |= re4::KEY_USE;
@@ -3466,8 +3692,20 @@ void __cdecl CameraSetHook(uint8_t* camera)
     uint8_t* g = Global();
     uint8_t* pl = Player();
     bool focused = Focused();
+    PollPad();
+    // Controller: L3 + R3 held for 0.6 s does what F6 does
+    static DWORD comboSince = 0;
+    static bool comboDone = false;
+    bool combo = focused && g_pad.Down(XINPUT_GAMEPAD_LEFT_THUMB) && g_pad.Down(XINPUT_GAMEPAD_RIGHT_THUMB);
+    if (!combo)
+        comboSince = 0, comboDone = false;
+    else if (!comboSince)
+        comboSince = GetTickCount();
+    bool padToggle = combo && !comboDone && GetTickCount() - comboSince >= 600;
+    if (padToggle)
+        comboDone = true;
     bool key = focused && Down(g_cfg.toggleKey);
-    if (key && !g_keyWasDown)
+    if ((key && !g_keyWasDown) || padToggle)
     {
         g_requested = !g_requested;
         if (g_requested && !StartRuntime())
@@ -3743,6 +3981,17 @@ const char* kHelp =
     "V  melee          E  use\n"
     "\n"
     "F10  MW2 menu     F6  MW2 on / off";
+const char* kHelpPad =
+    "MW2 CONTROLS (CONTROLLER)\n"
+    "Left stick  move    Right stick  look\n"
+    "L3  sprint          A  jump\n"
+    "B  crouch           D-pad down  prone\n"
+    "RT  fire            LT  aim\n"
+    "X  reload / use     Y  next gun\n"
+    "RB  grenade         LB  tactical\n"
+    "R3  melee           Back  attache case\n"
+    "\n"
+    "D-pad up  MW2 menu   L3+R3 held  MW2 on / off";
 
 std::string StatusText()
 {
@@ -3926,7 +4175,7 @@ void DrawOverlay(IDirect3DDevice9* device)
             if (!status.empty() && UpdateText(device, g_statusText, status, textPx))
                 DrawPanel(device, g_statusText, s * 2.6f, s - textPx * .1f, indicator);
         }
-        if (drawMw2 && g_cfg.showControls && !MenuOpen() && UpdateText(device, g_helpText, kHelp, textPx))
+        if (drawMw2 && g_cfg.showControls && !MenuOpen() && UpdateText(device, g_helpText, g_pad.connected ? kHelpPad : kHelp, textPx))
         {
             float m = h * .03f;
             DrawPanel(device, g_helpText, m, m, 0xffffffff);
@@ -4232,6 +4481,21 @@ bool Init()
     if (!padHooked && !(padHooked = HookCall(pr, (void*)&PadReadHook, (void**)&g_padReadOrig)))
         return false;
     Log("input filter on PadRead: keys 0x%p/0x%p joy 0x%p", (void*)g_keyOn, (void*)g_keyTrg, (void*)g_joy);
+    static bool xinputDone = false;
+    if (!xinputDone)
+    {
+        xinputDone = true;
+        if (HookXInput())
+            Log("controller: RE4's XInputGetState import hooked (was 0x%p)", (void*)g_xinputGet);
+        else if (HMODULE xi = LoadLibraryA("xinput1_3.dll"))
+        {
+            // No import to hook: MW2 still reads the pad, but RE4 sees it too
+            g_xinputGet = (XInputGetStateFn)GetProcAddress(xi, (LPCSTR)2);
+            Log("controller: no XInput import in RE4; reading xinput1_3 directly (0x%p)", (void*)g_xinputGet);
+        }
+        else
+            Log("controller: XInput not available");
+    }
     if (g_cfg.damageTrace && g_emMgr)
     {
         AddVectoredExceptionHandler(1, TraceHandler);
