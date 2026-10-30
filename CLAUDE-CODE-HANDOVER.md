@@ -314,6 +314,14 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
 
+## v49 (2026-10-30): CONTROLLER tab (button remapping)
+- New F10 tab CONTROLLER (TAB_PAD, before CONTROLS): one row per PadAction (15) -> PadInput (A..DPAD_RIGHT, LT/RT as
+  triggers > 0.3, NONE). Left/Right cycles, Enter/A captures the next pad press (Esc/Backspace or 6 s cancels). An input
+  already used is swapped to the other action. Rows: STICKS (SwapSticks), INVERT LOOK, RESET TO DEFAULTS.
+- INI [ControllerButtons] Fire=RT ... Menu=DPAD_UP (names in kPadInputNames). Fixed: menu D-pad/A/B/LB/RB, Start, L3+R3.
+- Exchange / PadReadHook / MenuInput use PadAct(PA_*) instead of fixed buttons; help panel = PadHelpText() from bindings.
+- Deployed 2026-10-30 (backup MW2RE4.before-v49-*), untested.
+
 ## v48 (2026-10-30): Xbox controller (XInput)
 - RE4 imports xinput1_3 XInputGetState by ordinal 2 (IAT 0x1710CA8). `HookXInput` points that import at `XInputGetStateHook`
   (keeps whatever was there, e.g. another mod's hook). While `PadReadHook` filters RE4's keys (`g_padBlockRe4`), RE4 sees

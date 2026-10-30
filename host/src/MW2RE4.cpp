@@ -23,7 +23,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v48 (controller)";
+constexpr const char* kVersion = "MW2RE4 v49 (controller buttons menu)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -209,7 +209,45 @@ struct Settings
     int controller = 1;        // an Xbox controller (XInput) plays MW2 while it has control
     int stickSpeed = 220;      // degrees per second at full right-stick tilt (hip fire; aiming slows it)
     int invertStickY = 0;
+    int swapSticks = 0;        // 1 = left stick looks, right stick moves
 } g_cfg;
+
+// Controller buttons (CONTROLLER tab, INI [ControllerButtons]): which pad input does each MW2/RE4 action.
+// The menu itself always uses D-pad / A / B / LB / RB, Start is RE4's pause and L3 + R3 held turns MW2 on/off.
+enum PadInput { PI_NONE, PI_A, PI_B, PI_X, PI_Y, PI_LB, PI_RB, PI_LT, PI_RT, PI_L3, PI_R3, PI_BACK,
+                PI_UP, PI_DOWN, PI_LEFT, PI_RIGHT, PI_COUNT };
+const char* kPadInputNames[PI_COUNT] = { "NONE", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3", "BACK",
+                                         "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT" };
+const WORD kPadInputBits[PI_COUNT] = { 0, XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+    XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0, XINPUT_GAMEPAD_LEFT_THUMB,
+    XINPUT_GAMEPAD_RIGHT_THUMB, XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_DPAD_UP, XINPUT_GAMEPAD_DPAD_DOWN,
+    XINPUT_GAMEPAD_DPAD_LEFT, XINPUT_GAMEPAD_DPAD_RIGHT };
+enum PadAction { PA_FIRE, PA_AIM, PA_RELOAD, PA_NEXT, PA_JUMP, PA_CROUCH, PA_PRONE, PA_FRAG, PA_FLASH, PA_MELEE,
+                 PA_SPRINT, PA_CASE, PA_ASHLEY, PA_MAP, PA_MENU, PA_COUNT };
+struct PadActionInfo { const char* label; const char* key; int def; };
+const PadActionInfo kPadActions[PA_COUNT] = {
+    { "FIRE", "Fire", PI_RT },
+    { "AIM", "Aim", PI_LT },
+    { "RELOAD / USE", "Reload", PI_X },
+    { "NEXT GUN", "NextGun", PI_Y },
+    { "JUMP", "Jump", PI_A },
+    { "CROUCH", "Crouch", PI_B },
+    { "PRONE", "Prone", PI_DOWN },
+    { "GRENADE", "Grenade", PI_RB },
+    { "TACTICAL (FLASH)", "Tactical", PI_LB },
+    { "MELEE", "Melee", PI_R3 },
+    { "SPRINT", "Sprint", PI_L3 },
+    { "ATTACHE CASE", "Case", PI_BACK },
+    { "ASHLEY", "Ashley", PI_LEFT },
+    { "MAP", "Map", PI_RIGHT },
+    { "MW2 MENU", "Menu", PI_UP },
+};
+int g_padBind[PA_COUNT] = {};
+void DefaultPadBinds()
+{
+    for (int i = 0; i < PA_COUNT; ++i)
+        g_padBind[i] = kPadActions[i].def;
+}
 
 // Balancing menu (INI [Balancing]). A preset fills every value; changing one makes the preset Custom.
 struct BalanceCfg
@@ -320,6 +358,16 @@ void LoadSettings()
     g_cfg.controller = GetPrivateProfileIntA("MW2RE4", "Controller", g_cfg.controller, path) != 0;
     g_cfg.stickSpeed = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "StickSpeed", g_cfg.stickSpeed, path), 60, 600);
     g_cfg.invertStickY = GetPrivateProfileIntA("MW2RE4", "InvertStickY", g_cfg.invertStickY, path) != 0;
+    g_cfg.swapSticks = GetPrivateProfileIntA("MW2RE4", "SwapSticks", g_cfg.swapSticks, path) != 0;
+    DefaultPadBinds();
+    for (int i = 0; i < PA_COUNT; ++i)
+    {
+        char v[32];
+        GetPrivateProfileStringA("ControllerButtons", kPadActions[i].key, "", v, sizeof(v), path);
+        for (int in = 0; in < PI_COUNT && v[0]; ++in)
+            if (!_stricmp(v, kPadInputNames[in]))
+                g_padBind[i] = in;
+    }
     g_cfg.menuHint = GetPrivateProfileIntA("MW2RE4", "MenuHint", g_cfg.menuHint, path);
     auto balInt = [&](const char* key, int def, int lo, int hi) {
         return std::clamp((int)GetPrivateProfileIntA("Balancing", key, def, path), lo, hi);
@@ -1565,7 +1613,7 @@ struct PadState
 {
     bool connected = false;
     WORD buttons = 0, prev = 0;
-    float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;
+    float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0, prevLt = 0, prevRt = 0;
     bool Down(WORD b) const { return connected && (buttons & b) != 0; }
     bool Pressed(WORD b) const { return connected && (buttons & b) != 0 && !(prev & b); }
 } g_pad;
@@ -1635,6 +1683,7 @@ void Radial(float& x, float& y, float deadzone)
 void PollPad()
 {
     WORD prev = g_pad.buttons;
+    float prevLt = g_pad.lt, prevRt = g_pad.rt;
     bool was = g_pad.connected;
     DWORD now = GetTickCount();
     static DWORD nextScan = 0;
@@ -1656,6 +1705,8 @@ void PollPad()
         Log(ok ? "controller: XInput pad %lu connected" : "controller: pad %lu gone", g_padIndex);
     g_pad = {};
     g_pad.prev = prev;
+    g_pad.prevLt = prevLt;
+    g_pad.prevRt = prevRt;
     if (!ok)
         return;
     const XINPUT_GAMEPAD& p = s.Gamepad;
@@ -1668,8 +1719,79 @@ void PollPad()
     g_pad.ry = axis(p.sThumbRY);
     Radial(g_pad.lx, g_pad.ly, .24f);
     Radial(g_pad.rx, g_pad.ry, .20f);
+    if (g_cfg.swapSticks)
+    {
+        std::swap(g_pad.lx, g_pad.rx);
+        std::swap(g_pad.ly, g_pad.ry);
+    }
     g_pad.lt = p.bLeftTrigger / 255.f;
     g_pad.rt = p.bRightTrigger / 255.f;
+}
+
+bool PadInputDown(int in)
+{
+    if (!g_pad.connected || in <= PI_NONE || in >= PI_COUNT)
+        return false;
+    if (in == PI_LT) return g_pad.lt > .3f;
+    if (in == PI_RT) return g_pad.rt > .3f;
+    return (g_pad.buttons & kPadInputBits[in]) != 0;
+}
+bool PadInputPressed(int in)
+{
+    if (!g_pad.connected || in <= PI_NONE || in >= PI_COUNT)
+        return false;
+    if (in == PI_LT) return g_pad.lt > .3f && g_pad.prevLt <= .3f;
+    if (in == PI_RT) return g_pad.rt > .3f && g_pad.prevRt <= .3f;
+    return g_pad.Pressed(kPadInputBits[in]);
+}
+bool PadAct(int action) { return PadInputDown(g_padBind[action]); }
+bool PadActPressed(int action) { return PadInputPressed(g_padBind[action]); }
+
+// The pad input's name as the menu and the controls panel show it
+std::string PadInputLabel(int in)
+{
+    static const char* labels[PI_COUNT] = { "-", "A", "B", "X", "Y", "LB", "RB", "LT", "RT", "L3", "R3", "BACK",
+                                            "D-PAD UP", "D-PAD DOWN", "D-PAD LEFT", "D-PAD RIGHT" };
+    return in >= 0 && in < PI_COUNT ? labels[in] : "-";
+}
+
+void SavePadBind(int action)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "%sMW2RE4.ini", g_dir);
+    WritePrivateProfileStringA("ControllerButtons", kPadActions[action].key, kPadInputNames[g_padBind[action]], path);
+}
+
+// Gives `action` the input `in`; an action that had it takes the old input of `action` (a swap).
+void SetPadBind(int action, int in)
+{
+    int old = g_padBind[action];
+    if (in != PI_NONE)
+        for (int i = 0; i < PA_COUNT; ++i)
+            if (i != action && g_padBind[i] == in)
+            {
+                g_padBind[i] = old;
+                SavePadBind(i);
+            }
+    g_padBind[action] = in;
+    SavePadBind(action);
+}
+
+std::string PadHelpText()
+{
+    std::string t = "MW2 CONTROLS (CONTROLLER)\n";
+    t += g_cfg.swapSticks ? "Right stick  move    Left stick  look\n" : "Left stick  move    Right stick  look\n";
+    for (int i = 0; i < PA_COUNT; i += 2)
+    {
+        char line[96];
+        if (i + 1 < PA_COUNT)
+            snprintf(line, sizeof(line), "%s  %s     %s  %s\n", PadInputLabel(g_padBind[i]).c_str(),
+                     kPadActions[i].label, PadInputLabel(g_padBind[i + 1]).c_str(), kPadActions[i + 1].label);
+        else
+            snprintf(line, sizeof(line), "%s  %s\n", PadInputLabel(g_padBind[i]).c_str(), kPadActions[i].label);
+        t += line;
+    }
+    return t + "L3+R3 held  MW2 on / off   (buttons: CONTROLLER tab)";
 }
 
 void Notice(const std::string& text, DWORD ms = 3000)
@@ -1729,8 +1851,8 @@ void Restore();
 // ---------------------------------------------------------------- MW2 menu (F10): one menu, five tabs
 // Settings, Guns (the MW2 gun for each RE4 gun), Damage (per gun class), Balancing (difficulty) and Controls.
 // Q/E or Tab change the tab, Up/Down choose a row, Left/Right change it, Enter uses it, F10 or Backspace close.
-enum MenuTab { TAB_SETTINGS, TAB_GUNS, TAB_DAMAGE, TAB_BALANCING, TAB_CONTROLS, TAB_COUNT };
-const char* kTabNames[TAB_COUNT] = { "SETTINGS", "GUNS", "DAMAGE", "BALANCING", "CONTROLS" };
+enum MenuTab { TAB_SETTINGS, TAB_GUNS, TAB_DAMAGE, TAB_BALANCING, TAB_PAD, TAB_CONTROLS, TAB_COUNT };
+const char* kTabNames[TAB_COUNT] = { "SETTINGS", "GUNS", "DAMAGE", "BALANCING", "CONTROLLER", "CONTROLS" };
 bool g_menuOpen = false;
 int g_menuTab = TAB_SETTINGS;
 int g_settingsRow = 0, g_damageRow = 0, g_balanceRow = 0;
@@ -1753,15 +1875,9 @@ const char* kControls =
     "F10  this menu\n"
     "F7   controls panel on / off      F5  gun list in the case on / off\n"
     "\n"
-    "XBOX CONTROLLER\n"
-    "Left stick  move        Right stick  look\n"
-    "RT  fire                LT  aim\n"
-    "A  jump                 B  crouch          D-pad down  prone\n"
-    "X  reload / use         Y  next gun        L3  sprint     R3  melee\n"
-    "RB  grenade             LB  tactical (flash)\n"
-    "Back  attache case      D-pad left  Ashley     D-pad right  map\n"
-    "D-pad up  this menu (D-pad, A, B, LB/RB)     Start  RE4 pause\n"
-    "L3 + R3 held  MW2 on / off";
+    "XBOX CONTROLLER: buttons and sticks are set in the CONTROLLER tab.\n"
+    "In this menu: D-pad choose / change, A select, B close, LB / RB tabs.\n"
+    "Start  RE4 pause        L3 + R3 held  MW2 on / off";
 
 void SaveBalancing()
 {
@@ -2112,6 +2228,101 @@ std::string GunsText()
     return t + page;
 }
 
+// ---- Controller tab: one row per action, then sticks, invert look and defaults
+int g_padRow = 0;
+int g_padCapture = -1;      // action waiting for "press the new button"
+DWORD g_padCaptureStart = 0;
+constexpr int kPadRows = PA_COUNT + 3;
+void PadTabInput(bool up, bool down, int dir, bool enter)
+{
+    if (up) g_padRow = (g_padRow + kPadRows - 1) % kPadRows;
+    if (down) g_padRow = (g_padRow + 1) % kPadRows;
+    if (g_padRow < PA_COUNT)
+    {
+        if (dir)
+            SetPadBind(g_padRow, (g_padBind[g_padRow] + PI_COUNT + dir) % PI_COUNT);
+        else if (enter && g_pad.connected)
+        {
+            g_padCapture = g_padRow;
+            g_padCaptureStart = GetTickCount();
+        }
+        return;
+    }
+    if (!dir && !enter)
+        return;
+    switch (g_padRow - PA_COUNT)
+    {
+    case 0:
+        g_cfg.swapSticks = !g_cfg.swapSticks;
+        SaveSetting("SwapSticks", "%.0f", g_cfg.swapSticks);
+        break;
+    case 1:
+        g_cfg.invertStickY = !g_cfg.invertStickY;
+        SaveSetting("InvertStickY", "%.0f", g_cfg.invertStickY);
+        break;
+    case 2:
+        if (enter)
+        {
+            DefaultPadBinds();
+            for (int i = 0; i < PA_COUNT; ++i)
+                SavePadBind(i);
+            Notice("Controller buttons reset to the defaults", 2500);
+        }
+        break;
+    }
+}
+
+// While an action waits for its new button, the next pad input pressed is taken (Esc / Backspace or 6 s cancel).
+// Returns true while capturing, so the menu ignores that input.
+bool PadCapture(bool keyCancel)
+{
+    if (g_padCapture < 0)
+        return false;
+    if (keyCancel || !g_pad.connected || GetTickCount() - g_padCaptureStart > 6000)
+    {
+        g_padCapture = -1;
+        return true;
+    }
+    for (int in = PI_NONE + 1; in < PI_COUNT; ++in)
+        if (PadInputPressed(in))
+        {
+            SetPadBind(g_padCapture, in);
+            g_padCapture = -1;
+            break;
+        }
+    return true;
+}
+
+std::string PadTabText()
+{
+    std::string t = g_pad.connected ? "Controller connected." : "No controller found (XInput / Xbox pads).";
+    t += g_cfg.controller ? "\n" : "  Controller is OFF in the Settings tab.\n";
+    t += "Left/Right: change    A or Enter: press the new button    Same button twice = swapped\n\n";
+    for (int i = 0; i < kPadRows; ++i)
+    {
+        char row[160];
+        if (i < PA_COUNT)
+        {
+            if (g_padCapture == i)
+                snprintf(row, sizeof(row), "%-20s  > press a button... (Esc cancels)", kPadActions[i].label);
+            else
+                snprintf(row, sizeof(row), "%-20s  < %s >", kPadActions[i].label, PadInputLabel(g_padBind[i]).c_str());
+        }
+        else if (i == PA_COUNT)
+            snprintf(row, sizeof(row), "\n%sSTICKS                < %s >", i == g_padRow ? "> " : "   ",
+                     g_cfg.swapSticks ? "LEFT LOOKS, RIGHT MOVES" : "LEFT MOVES, RIGHT LOOKS");
+        else if (i == PA_COUNT + 1)
+            snprintf(row, sizeof(row), "INVERT LOOK           < %s >", g_cfg.invertStickY ? "ON" : "OFF");
+        else
+            snprintf(row, sizeof(row), "RESET TO DEFAULTS     Enter / A");
+        if (i != PA_COUNT)
+            t += i == g_padRow ? "> " : "   ";
+        t += row;
+        t += "\n";
+    }
+    return t + "\nFixed: menu D-pad / A / B / LB / RB, Start = RE4 pause, L3 + R3 held = MW2 on / off.";
+}
+
 void SetTab(int tab)
 {
     g_menuTab = (tab + TAB_COUNT) % TAB_COUNT;
@@ -2141,6 +2352,7 @@ std::string MenuText()
     case TAB_GUNS: return t + GunsText();
     case TAB_DAMAGE: return t + DamageText();
     case TAB_BALANCING: return t + BalancingText();
+    case TAB_PAD: return t + PadTabText();
     default: return t + kControls;
     }
 }
@@ -2152,7 +2364,12 @@ void MenuInput(bool focused)
          q = Edge('Q'), e = Edge('E'), tab = Edge(VK_TAB);
     // Controller: D-pad up opens the menu; inside it D-pad moves, A selects, B closes, LB/RB change tabs.
     bool pad = focused && g_pad.connected;
-    bool padOpen = pad && !g_menuOpen && g_pad.Pressed(XINPUT_GAMEPAD_DPAD_UP);
+    bool padOpen = pad && !g_menuOpen && PadActPressed(PA_MENU);
+    if (g_menuOpen && g_active && focused && PadCapture(Edge(VK_ESCAPE) || back))
+    {
+        g_padSwallow = true;
+        return;
+    }
     if (pad && g_menuOpen)
     {
         up |= g_pad.Pressed(XINPUT_GAMEPAD_DPAD_UP);
@@ -2214,6 +2431,7 @@ void MenuInput(bool focused)
             case TAB_GUNS: GunsInput(up, down, left, right, enter); break;
             case TAB_DAMAGE: DamageInput(up, down, dir); break;
             case TAB_BALANCING: BalancingInput(up, down, dir); break;
+            case TAB_PAD: PadTabInput(up, down, dir, enter); break;
             }
     }
     if (g_menuOpen)
@@ -3336,21 +3554,21 @@ void Exchange(uint8_t* g, uint8_t* pl)
             bool prompt = g_actBtnActive && *g_actBtnActive;
             // L3 starts a sprint that lasts while the left stick stays forward (as MW2 on consoles)
             static bool sprint = false;
-            if (g_pad.Pressed(XINPUT_GAMEPAD_LEFT_THUMB))
+            if (PadActPressed(PA_SPRINT))
                 sprint = true;
-            if (g_pad.ly < .5f || g_pad.lt > .3f || g_pad.rt > .3f)
+            if (g_pad.ly < .5f || PadAct(PA_AIM) || PadAct(PA_FIRE))
                 sprint = false;
-            if (g_pad.rt > .3f) g_host.buttons |= 1;
-            if (g_pad.lt > .3f) g_host.buttons |= 2;
-            if (g_pad.Down(XINPUT_GAMEPAD_X)) g_host.buttons |= prompt ? 32768 : 4;
-            if (g_pad.Down(XINPUT_GAMEPAD_Y)) g_host.buttons |= 8;
+            if (PadAct(PA_FIRE)) g_host.buttons |= 1;
+            if (PadAct(PA_AIM)) g_host.buttons |= 2;
+            if (PadAct(PA_RELOAD)) g_host.buttons |= prompt ? 32768 : 4;
+            if (PadAct(PA_NEXT)) g_host.buttons |= 8;
             if (sprint) g_host.buttons |= 256;
-            if (g_pad.Down(XINPUT_GAMEPAD_A)) g_host.buttons |= 512;
-            if (g_pad.Down(XINPUT_GAMEPAD_B)) g_host.buttons |= 1024;
-            if (g_pad.Down(XINPUT_GAMEPAD_DPAD_DOWN)) g_host.buttons |= 2048;
-            if (g_pad.Down(XINPUT_GAMEPAD_RIGHT_SHOULDER)) g_host.buttons |= 4096;
-            if (g_pad.Down(XINPUT_GAMEPAD_LEFT_SHOULDER)) g_host.buttons |= 8192;
-            if (g_pad.Down(XINPUT_GAMEPAD_RIGHT_THUMB)) g_host.buttons |= 16384;
+            if (PadAct(PA_JUMP)) g_host.buttons |= 512;
+            if (PadAct(PA_CROUCH)) g_host.buttons |= 1024;
+            if (PadAct(PA_PRONE)) g_host.buttons |= 2048;
+            if (PadAct(PA_FRAG)) g_host.buttons |= 4096;
+            if (PadAct(PA_FLASH)) g_host.buttons |= 8192;
+            if (PadAct(PA_MELEE)) g_host.buttons |= 16384;
             // Right stick as mouse counts: MW2 sensitivity 5 turns 0.11 degrees per count, and MW2 slows it
             // itself while aiming. Response curve as IW4's default pad curve.
             auto curve = [](float v) { float a = std::fabs(v); return std::copysign(.35f * a + .65f * a * a * a, v); };
@@ -3509,21 +3727,22 @@ void __cdecl PadReadHook()
     *g_keyTrg &= allowed;
     g_padBlockRe4 = g_cfg.controller != 0;
     // Controller: RE4 no longer sees the pad, so its case, Ashley and map keys are pressed here
-    static WORD padPrev = 0;
-    WORD pad = g_pad.connected && Focused() && !MenuOpen() && !g_padSwallow ? g_pad.buttons : 0;
-    auto press = [&](WORD b, uint64_t key) {
-        if (pad & b)
+    bool pad = g_pad.connected && Focused() && !MenuOpen() && !g_padSwallow;
+    static bool padPrev[3] = {};
+    const int padActs[3] = { PA_CASE, PA_ASHLEY, PA_MAP };
+    const uint64_t padKeys[3] = { re4::KEY_SSCRN, re4::KEY_ASHLEY, re4::KEY_MAP };
+    for (int i = 0; i < 3; ++i)
+    {
+        bool d = pad && PadAct(padActs[i]);
+        if (d)
         {
-            *g_keyOn |= key;
-            if (!(padPrev & b))
-                *g_keyTrg |= key;
+            *g_keyOn |= padKeys[i];
+            if (!padPrev[i])
+                *g_keyTrg |= padKeys[i];
         }
-    };
-    press(XINPUT_GAMEPAD_BACK, re4::KEY_SSCRN);
-    press(XINPUT_GAMEPAD_DPAD_LEFT, re4::KEY_ASHLEY);
-    press(XINPUT_GAMEPAD_DPAD_RIGHT, re4::KEY_MAP);
-    padPrev = pad;
-    bool use = Focused() && !MenuOpen() && (Down('E') || (pad & XINPUT_GAMEPAD_X));
+        padPrev[i] = d;
+    }
+    bool use = Focused() && !MenuOpen() && (Down('E') || (pad && PadAct(PA_RELOAD)));
     if (use)
     {
         *g_keyOn |= re4::KEY_USE;
@@ -3981,17 +4200,7 @@ const char* kHelp =
     "V  melee          E  use\n"
     "\n"
     "F10  MW2 menu     F6  MW2 on / off";
-const char* kHelpPad =
-    "MW2 CONTROLS (CONTROLLER)\n"
-    "Left stick  move    Right stick  look\n"
-    "L3  sprint          A  jump\n"
-    "B  crouch           D-pad down  prone\n"
-    "RT  fire            LT  aim\n"
-    "X  reload / use     Y  next gun\n"
-    "RB  grenade         LB  tactical\n"
-    "R3  melee           Back  attache case\n"
-    "\n"
-    "D-pad up  MW2 menu   L3+R3 held  MW2 on / off";
+
 
 std::string StatusText()
 {
@@ -4175,7 +4384,7 @@ void DrawOverlay(IDirect3DDevice9* device)
             if (!status.empty() && UpdateText(device, g_statusText, status, textPx))
                 DrawPanel(device, g_statusText, s * 2.6f, s - textPx * .1f, indicator);
         }
-        if (drawMw2 && g_cfg.showControls && !MenuOpen() && UpdateText(device, g_helpText, g_pad.connected ? kHelpPad : kHelp, textPx))
+        if (drawMw2 && g_cfg.showControls && !MenuOpen() && UpdateText(device, g_helpText, g_pad.connected ? PadHelpText() : std::string(kHelp), textPx))
         {
             float m = h * .03f;
             DrawPanel(device, g_helpText, m, m, 0xffffffff);
