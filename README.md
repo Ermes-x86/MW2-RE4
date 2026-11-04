@@ -127,7 +127,7 @@ choose a row, **Left / Right** change it, **Enter** uses it, **F10** or
 
 | Tab | What it has |
 |---|---|
-| Settings | Field of view, mouse sensitivity, infinite ammo, MW2 character skin, MW2 resolution, FPS cap, controls panel, gun list, restart MW2 |
+| Settings | Field of view, mouse sensitivity, infinite ammo, MW2 character skin, MW2 resolution, FPS cap, controls panel, gun list, controller, stick look speed, health HUD style, restart MW2 |
 | Guns | Which MW2 gun stands for the RE4 gun Leon has equipped (ammo stays RE4's) |
 | Damage | Gun damage multipliers per class (1.0 = exactly the RE4 gun's damage) |
 | Balancing | Difficulty settings to make MW2's speed fair against RE4 (below) |
@@ -141,6 +141,11 @@ Choose a lower one if the game stutters.
 **FPS cap.** MW2 draws one frame per RE4 frame. With a 120 fps mod for RE4,
 the FPS cap (30 / 60 / 120) limits how often MW2 draws. MW2 can never draw
 more frames than RE4.
+
+**Health HUD style.** How Leon's and Ashley's health is shown while MW2 has
+control: RE4 (default: a life band around a dial with the gun's ammo, green,
+yellow, then red), RE2 CLASSIC (a heart monitor with Fine, Caution and Danger)
+or SIMPLE BARS. It is drawn by the mod, not taken from either game.
 
 **Infinite ammo.** ON: the MW2 gun never runs dry and the case's ammo is not
 used up. OFF: ammo comes from Leon's attache case.

@@ -23,7 +23,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v49 (controller buttons menu)";
+constexpr const char* kVersion = "MW2RE4 v50 (RE4 / RE2 style health HUD)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log
@@ -210,7 +210,10 @@ struct Settings
     int stickSpeed = 220;      // degrees per second at full right-stick tilt (hip fire; aiming slows it)
     int invertStickY = 0;
     int swapSticks = 0;        // 1 = left stick looks, right stick moves
+    int hudStyle = 1;          // health HUD: 0 plain bars, 1 RE4 style life gauge, 2 RE2 classic heart monitor
 } g_cfg;
+const char* kHudStyles[] = { "SIMPLE BARS", "RE4", "RE2 CLASSIC" };
+constexpr int kHudStyleCount = 3;
 
 // Controller buttons (CONTROLLER tab, INI [ControllerButtons]): which pad input does each MW2/RE4 action.
 // The menu itself always uses D-pad / A / B / LB / RB, Start is RE4's pause and L3 + R3 held turns MW2 on/off.
@@ -358,6 +361,8 @@ void LoadSettings()
     g_cfg.controller = GetPrivateProfileIntA("MW2RE4", "Controller", g_cfg.controller, path) != 0;
     g_cfg.stickSpeed = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "StickSpeed", g_cfg.stickSpeed, path), 60, 600);
     g_cfg.invertStickY = GetPrivateProfileIntA("MW2RE4", "InvertStickY", g_cfg.invertStickY, path) != 0;
+    g_cfg.hudStyle = std::clamp((int)GetPrivateProfileIntA("MW2RE4", "HudStyle", g_cfg.hudStyle, path), 0,
+                                kHudStyleCount - 1);
     g_cfg.swapSticks = GetPrivateProfileIntA("MW2RE4", "SwapSticks", g_cfg.swapSticks, path) != 0;
     DefaultPadBinds();
     for (int i = 0; i < PA_COUNT; ++i)
@@ -1916,7 +1921,7 @@ bool RestartNeeded()
 }
 
 // ---- Settings tab
-constexpr int kSettingsRows = 11;
+constexpr int kSettingsRows = 12;
 void RearmGun();
 void SettingsInput(bool up, bool down, int dir, bool enter)
 {
@@ -2004,6 +2009,13 @@ void SettingsInput(bool up, bool down, int dir, bool enter)
         }
         break;
     case 10:
+        if (dir || enter)
+        {
+            g_cfg.hudStyle = (g_cfg.hudStyle + kHudStyleCount + (dir ? dir : 1)) % kHudStyleCount;
+            SaveSetting("HudStyle", "%.0f", g_cfg.hudStyle);
+        }
+        break;
+    case 11:
         if (enter && RestartNeeded())
         {
             // MW2 loads the new map's soldiers and render size: restart it. RE4 keeps running; MW2 mode returns
@@ -2046,7 +2058,8 @@ std::string SettingsText()
     snprintf(rows[8], 160, "CONTROLLER           < %s >%s", g_cfg.controller ? "ON" : "OFF",
              !g_cfg.controller ? "" : g_pad.connected ? "  (connected)" : "  (none found)");
     snprintf(rows[9], 160, "STICK LOOK SPEED     %s  %d", Bar((g_cfg.stickSpeed - 60) / 540.f).c_str(), g_cfg.stickSpeed);
-    snprintf(rows[10], 160, "%s", !RestartNeeded() ? "RESTART MW2          (not needed)"
+    snprintf(rows[10], 160, "HEALTH HUD STYLE     < %s >", kHudStyles[g_cfg.hudStyle]);
+    snprintf(rows[11], 160, "%s", !RestartNeeded() ? "RESTART MW2          (not needed)"
                                                   : "RESTART MW2 NOW      Enter: applies skin and resolution (MW2 loads again)");
     std::string t;
     for (int i = 0; i < kSettingsRows; ++i)
@@ -4085,7 +4098,7 @@ void Quad(IDirect3DDevice9* device, float x, float y, float w, float h, DWORD co
 // White glyphs, alpha from coverage; the colour comes from the quad's vertex colour.
 struct TextTexture
 {
-    std::string text;
+    std::string text, face;
     int pixelHeight = 0;
     IDirect3DTexture9* texture = nullptr;
     UINT width = 0, height = 0;
@@ -4098,14 +4111,15 @@ void ReleaseText(TextTexture& t)
     t.text.clear();
 }
 
-bool UpdateText(IDirect3DDevice9* device, TextTexture& t, const std::string& text, int pixelHeight)
+bool UpdateText(IDirect3DDevice9* device, TextTexture& t, const std::string& text, int pixelHeight,
+                const char* face = "Segoe UI")
 {
-    if (t.texture && t.text == text && t.pixelHeight == pixelHeight)
+    if (t.texture && t.text == text && t.pixelHeight == pixelHeight && t.face == face)
         return true;
     ReleaseText(t);
     HDC dc = CreateCompatibleDC(nullptr);
     HFONT font = CreateFontA(-pixelHeight, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, "Segoe UI");
+                             CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, face);
     HGDIOBJ oldFont = SelectObject(dc, font);
     std::vector<std::string> lines;
     for (size_t start = 0;;)
@@ -4170,6 +4184,7 @@ bool UpdateText(IDirect3DDevice9* device, TextTexture& t, const std::string& tex
     DeleteDC(dc);
     if (!ok) { ReleaseText(t); return false; }
     t.text = text;
+    t.face = face;
     t.pixelHeight = pixelHeight;
     t.width = w;
     t.height = h;
@@ -4187,6 +4202,306 @@ void DrawPanel(IDirect3DDevice9* device, TextTexture& t, float x, float y, DWORD
     device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
     Quad(device, x + 1, y + 1, (float)t.width, (float)t.height, 0xff000000, t.texture);
     Quad(device, x, y, (float)t.width, (float)t.height, color, t.texture);
+}
+
+// ---------------------------------------------------------------- Health HUD (Leon and Ashley / Luis)
+// RE4's own HUD is hidden while MW2 has control, so the plugin draws the health in the style picked in Settings
+// (HudStyle). 1, RE4 style: a dark dial in the corner with the gun's ammo and a curved life band around it, green,
+// then yellow, then red and blinking, with Ashley's thinner band above it. 2, RE2 classic style: a heart monitor per
+// character with Fine / Caution / Danger. 0: the plain bars. All of it is drawn in code; no image comes from either
+// game.
+struct HudImage
+{
+    IDirect3DTexture9* texture = nullptr;
+    int w = 0, h = 0;
+    uint64_t key = ~0ull;
+    std::vector<uint32_t> px, background;
+};
+HudImage g_hudGauge, g_hudEcg[2];
+TextTexture g_hudAmmo, g_hudReserve, g_hudPartner, g_hudName[2], g_hudCondition[2];
+
+void HudClear(HudImage& im, int w, int h)
+{
+    if (im.w != w || im.h != h)
+    {
+        if (im.texture) { im.texture->Release(); im.texture = nullptr; }
+        im.w = w;
+        im.h = h;
+        im.background.clear();
+    }
+    im.px.assign((size_t)w * h, 0);
+}
+
+// Paints colour c (0xRRGGBB) at opacity a over pixel (x, y), straight alpha like the texture.
+void HudPaint(HudImage& im, int x, int y, uint32_t c, float a)
+{
+    if (a <= 0.f || x < 0 || y < 0 || x >= im.w || y >= im.h)
+        return;
+    a = std::min(a, 1.f);
+    uint32_t& d = im.px[(size_t)y * im.w + x];
+    float da = (d >> 24) / 255.f, oa = a + da * (1.f - a);
+    uint32_t out = (uint32_t)(oa * 255.f + .5f) << 24;
+    for (int s = 0; s < 24; s += 8)
+    {
+        float v = ((float)(c >> s & 255) * a + (float)(d >> s & 255) * da * (1.f - a)) / oa;
+        out |= (uint32_t)std::clamp(v + .5f, 0.f, 255.f) << s;
+    }
+    d = out;
+}
+
+bool HudUpload(IDirect3DDevice9* device, HudImage& im)
+{
+    if (!im.texture &&
+        FAILED(device->CreateTexture(im.w, im.h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &im.texture, nullptr)))
+    {
+        im.texture = nullptr;
+        return false;
+    }
+    D3DLOCKED_RECT rect{};
+    if (FAILED(im.texture->LockRect(0, &rect, nullptr, 0)))
+        return false;
+    for (int y = 0; y < im.h; ++y)
+        memcpy((uint8_t*)rect.pBits + (size_t)y * rect.Pitch, &im.px[(size_t)y * im.w], (size_t)im.w * 4);
+    im.texture->UnlockRect(0);
+    return true;
+}
+
+uint32_t Mix(uint32_t a, uint32_t b, float t)
+{
+    t = std::clamp(t, 0.f, 1.f);
+    uint32_t r = 0;
+    for (int s = 0; s < 24; s += 8)
+    {
+        float x = (float)(a >> s & 255), y = (float)(b >> s & 255);
+        r |= (uint32_t)(x + (y - x) * t + .5f) << s;
+    }
+    return r;
+}
+
+// How much of a pixel at distance d from a shape's centre line is inside radius r (one pixel of anti-aliasing).
+float Cover(float d, float r) { return std::clamp(r - d + .5f, 0.f, 1.f); }
+
+// Text with a one-pixel shadow; colour from the vertex colour.
+void HudText(IDirect3DDevice9* device, TextTexture& t, float x, float y, DWORD color)
+{
+    Quad(device, x + 1, y + 1, (float)t.width, (float)t.height, color & 0xff000000, t.texture);
+    Quad(device, x, y, (float)t.width, (float)t.height, color, t.texture);
+}
+
+// RE4 style dial: dark glass, a metal rim lit from the top left, a black outline.
+void PaintDial(HudImage& im, float cx, float cy, float r, float rim, float outline)
+{
+    int x0 = (int)(cx - r - outline - 2), x1 = (int)(cx + r + outline + 2);
+    int y0 = (int)(cy - r - outline - 2), y1 = (int)(cy + r + outline + 2);
+    for (int Y = std::max(0, y0); Y < std::min(im.h, y1); ++Y)
+        for (int X = std::max(0, x0); X < std::min(im.w, x1); ++X)
+        {
+            float x = X + .5f - cx, y = Y + .5f - cy, d = std::sqrt(x * x + y * y);
+            float lit = d > 0.f ? .5f - .5f * (x + y) / (d * 1.41421f) : .5f;
+            HudPaint(im, X, Y, 0x000000, Cover(d, r + outline) * .85f);
+            HudPaint(im, X, Y, Mix(0x3c4248, 0xd0d6dc, lit), Cover(d, r));
+            HudPaint(im, X, Y, Mix(0x2a323a, 0x07090b, d / (r - rim)), Cover(d, r - rim) * .96f);
+        }
+}
+
+// One life band around the dial: an arc of radius r from angle a0 (degrees; 90 = straight up, 180 = left) up to
+// the top of the dial, then a straight run to the right; t thick, filled by frac from the arc end, so it empties
+// from the far tip back toward the dial.
+void PaintBand(HudImage& im, float cx, float cy, float r, float a0, float run, float t, float outline, float frac,
+               uint32_t color)
+{
+    const float rad = 3.14159265f / 180.f;
+    float arc = (a0 - 90.f) * rad * r, fill = frac * (arc + run), half = t * .5f;
+    if (frac >= .999f) fill = 1e9f; // full: the round tip too
+    if (frac <= 0.f) fill = -1e9f;
+    float sx = r * std::cos(a0 * rad), sy = r * std::sin(a0 * rad); // where the arc starts (y up)
+    float pad = half + outline + 2.f;
+    int x0 = (int)(cx + std::min(sx, 0.f) - pad), x1 = (int)(cx + run + pad);
+    int y0 = (int)(cy - r - pad), y1 = (int)(cy - sy + pad);
+    for (int Y = std::max(0, y0); Y < std::min(im.h, y1); ++Y)
+        for (int X = std::max(0, x0); X < std::min(im.w, x1); ++X)
+        {
+            float x = X + .5f - cx, y = cy - (Y + .5f);
+            float tx = std::clamp(x, 0.f, run);
+            float d = std::hypot(x - tx, y - r), across = (y - r) / half, s = arc + tx;
+            float ang = std::atan2(y, x) / rad;
+            if (ang < -90.f)
+                ang += 360.f;
+            float da, acrossA = 0.f, sA = 0.f;
+            if (ang >= 90.f && ang <= a0)
+            {
+                float rr = std::hypot(x, y);
+                da = std::fabs(rr - r);
+                acrossA = (rr - r) / half;
+                sA = (a0 - ang) * rad * r;
+            }
+            else
+                da = std::hypot(x - sx, y - sy); // round cap at the start
+            if (da < d)
+            {
+                d = da;
+                across = acrossA;
+                s = sA;
+            }
+            float ring = Cover(d, half + outline);
+            if (ring <= 0.f)
+                continue;
+            HudPaint(im, X, Y, 0x000000, ring * .85f);
+            float cov = Cover(d, half);
+            if (cov <= 0.f)
+                continue;
+            across = std::clamp(across, -1.f, 1.f); // -1 inner edge, +1 outer edge
+            uint32_t lit = across > 0.f ? Mix(color, 0xffffff, across * .35f) : Mix(color, 0x000000, -across * .45f);
+            lit = Mix(lit, 0xffffff, std::exp(-(across - .45f) * (across - .45f) / .03f) * .3f);
+            float filled = std::clamp(fill - s + .5f, 0.f, 1.f);
+            HudPaint(im, X, Y, Mix(0x161616, lit, filled), cov * (.75f + .25f * filled));
+        }
+}
+
+uint32_t Re4LifeColor(float f, bool blink)
+{
+    if (f > .5f) return 0x3ccc4c;
+    if (f > .25f) return 0xe6c430;
+    return blink ? 0xff7a5a : 0xd8382a;
+}
+
+// RE4 style: bottom left, the dial shows the gun's loaded ammo and the reserve. Returns the HUD's top on screen.
+float DrawRe4Hud(IDirect3DDevice9* device, float h, float frac, const float* partnerFrac, const char* partnerName)
+{
+    float u = h / 1080.f * .9f;
+    int W = (int)(360 * u + .5f), H = (int)(224 * u + .5f);
+    float cx = 96 * u, cy = 152 * u, dial = 60 * u, t = 20 * u, r = dial + 10 * u + t * .5f;
+    float t2 = 11 * u, r2 = r + t * .5f + 7 * u + t2 * .5f, outline = std::max(1.5f, 2 * u);
+    DWORD now = GetTickCount();
+    bool blink = frac <= .25f && ((now / 280) & 1);
+    bool partnerBlink = partnerFrac && *partnerFrac <= .25f && ((now / 280) & 1);
+    uint64_t key = (uint64_t)(frac * 1000.f) | (uint64_t)(partnerFrac ? *partnerFrac * 1000.f + 1.f : 0.f) << 12 |
+                   (uint64_t)blink << 24 | (uint64_t)partnerBlink << 25 | (uint64_t)W << 26 | (uint64_t)H << 40;
+    if (key != g_hudGauge.key || !g_hudGauge.texture)
+    {
+        HudClear(g_hudGauge, W, H);
+        if (partnerFrac)
+            PaintBand(g_hudGauge, cx, cy, r2, 140.f, 190 * u, t2, outline, *partnerFrac,
+                      Re4LifeColor(*partnerFrac, partnerBlink));
+        PaintBand(g_hudGauge, cx, cy, r, 180.f, 240 * u, t, outline, frac, Re4LifeColor(frac, blink));
+        PaintDial(g_hudGauge, cx, cy, dial, std::max(2.f, 4 * u), outline);
+        g_hudGauge.key = HudUpload(device, g_hudGauge) ? key : ~0ull;
+    }
+    float x = h * .03f, y = h - h * .025f - H;
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+    if (g_hudGauge.texture)
+        Quad(device, x, y, (float)W, (float)H, 0xffffffff, g_hudGauge.texture);
+    char ammo[16] = "--", reserve[16] = "";
+    if (!g_cfg.re4Inventory || g_arm.item)
+    {
+        snprintf(ammo, sizeof(ammo), "%d", std::max(0, (int)g_guest.clip));
+        if (g_cfg.infiniteAmmo)
+            snprintf(reserve, sizeof(reserve), "INF");
+        else
+            snprintf(reserve, sizeof(reserve), "%d", std::max(0, (int)g_guest.stock));
+    }
+    if (UpdateText(device, g_hudAmmo, ammo, std::max(14, (int)(40 * u))))
+        HudText(device, g_hudAmmo, x + cx - g_hudAmmo.width * .5f, y + cy - g_hudAmmo.height * .75f, 0xfff2f2f2);
+    if (reserve[0] && UpdateText(device, g_hudReserve, reserve, std::max(10, (int)(19 * u))))
+        HudText(device, g_hudReserve, x + cx - g_hudReserve.width * .5f, y + cy + 8 * u, 0xffb8c4cc);
+    if (partnerFrac && UpdateText(device, g_hudPartner, partnerName, std::max(10, (int)(17 * u))))
+        HudText(device, g_hudPartner, x + cx + 12 * u, y + cy - r2 - t2 * .5f - outline - g_hudPartner.height,
+                0xffe8e8e8);
+    return y;
+}
+
+// RE2 classic condition: colour, heart rate and how strong the beat looks.
+struct Condition { const char* name; uint32_t color; float bpm, strength; };
+Condition ConditionFor(float f)
+{
+    if (f > .66f) return { "Fine", 0x4cf064, 72.f, 1.f };
+    if (f > .40f) return { "Caution", 0xf0e040, 96.f, .9f };
+    if (f > .20f) return { "Caution", 0xff9a2a, 116.f, .8f };
+    return { "Danger", 0xff3a30, 140.f, .62f };
+}
+
+// One heartbeat, p = 0..1: P wave, the QRS spike, T wave.
+float EcgWave(float p, float strength)
+{
+    auto bump = [p](float c, float w) { float x = (p - c) / w; return std::exp(-x * x); };
+    return .10f * bump(.16f, .035f) - .12f * bump(.295f, .016f) + strength * bump(.335f, .021f) -
+           .28f * bump(.375f, .018f) + .20f * bump(.56f, .05f);
+}
+
+// RE2 classic style heart monitor: dark screen with a faint green grid, a trace that sweeps left to right and
+// fades behind its bright head.
+void PaintEcg(HudImage& im, int W, int H, float u, const Condition& c, DWORD now, float phase)
+{
+    HudClear(im, W, H);
+    if (im.background.size() != im.px.size())
+    {
+        float border = std::max(1.5f, 2 * u), grid = 16 * u;
+        for (int Y = 0; Y < H; ++Y)
+            for (int X = 0; X < W; ++X)
+            {
+                if (X < border || Y < border || X >= W - border || Y >= H - border)
+                {
+                    HudPaint(im, X, Y, 0x5a646c, 1.f);
+                    continue;
+                }
+                HudPaint(im, X, Y, 0x030806, .84f);
+                if (std::fmod(X - border, grid) < 1.f || std::fmod(Y - border, grid) < 1.f)
+                    HudPaint(im, X, Y, 0x1f5a2c, .5f);
+            }
+        im.background = im.px;
+    }
+    im.px = im.background;
+    const float sweep = 2.4f; // seconds per screen
+    float left = 6 * u, tw = W - 12 * u, base = H * .72f, amp = H * .40f;
+    float head = std::fmod(now / 1000.f / sweep, 1.f) * tw, period = tw * (60.f / c.bpm) / sweep;
+    auto yAt = [&](float x) { return base - amp * EcgWave(std::fmod(x / period + phase + 1.f, 1.f), c.strength); };
+    float glow = 2.2f * u, core = std::max(.8f, 1.1f * u);
+    for (int X = (int)left; X < (int)(left + tw); ++X)
+    {
+        float x = X + .5f - left;
+        float age = std::fmod(head - x + tw, tw) / tw; // 0 at the head, near 1 just ahead of it
+        if (age > .9f)
+            continue; // the gap in front of the head
+        float fade = std::pow(1.f - age / .9f, 1.3f);
+        float ya = yAt(std::max(0.f, x - 1.f)), yb = yAt(x), lo = std::min(ya, yb), hi = std::max(ya, yb);
+        for (int Y = std::max(0, (int)(lo - 4 * glow)); Y < std::min(H, (int)(hi + 4 * glow) + 1); ++Y)
+        {
+            float yc = Y + .5f, d = std::max({ 0.f, lo - yc, yc - hi });
+            HudPaint(im, X, Y, c.color, std::min(1.f, (Cover(d, core) + .4f * std::exp(-d / glow)) * fade));
+        }
+    }
+    float hx = left + head, hy = yAt(head);
+    for (int Y = (int)(hy - 5 * u); Y <= (int)(hy + 5 * u); ++Y)
+        for (int X = (int)(hx - 5 * u); X <= (int)(hx + 5 * u); ++X)
+            HudPaint(im, X, Y, Mix(c.color, 0xffffff, .6f), Cover(std::hypot(X + .5f - hx, Y + .5f - hy), 2.f * u));
+}
+
+// RE2 classic style: Leon's monitor bottom left, Ashley's (or Luis's) smaller one above it. Returns the HUD's top.
+float DrawRe2Hud(IDirect3DDevice9* device, float h, float frac, const float* partnerFrac, const char* partnerName)
+{
+    float u = h / 1080.f * .9f, x = h * .03f, top = h - h * .025f;
+    int W = (int)(300 * u + .5f);
+    DWORD now = GetTickCount();
+    for (int i = 0; i < (partnerFrac ? 2 : 1); ++i)
+    {
+        float f = i ? *partnerFrac : frac;
+        int H = (int)((i ? 84 : 112) * u + .5f);
+        Condition c = ConditionFor(f);
+        float y = top - H - (i ? 8 * u : 0.f);
+        PaintEcg(g_hudEcg[i], W, H, u, c, now, i ? .45f : 0.f);
+        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+        if (HudUpload(device, g_hudEcg[i]))
+            Quad(device, x, y, (float)W, (float)H, 0xffffffff, g_hudEcg[i].texture);
+        if (UpdateText(device, g_hudName[i], i ? partnerName : "LEON", std::max(10, (int)(17 * u))))
+            HudText(device, g_hudName[i], x + 8 * u, y + 4 * u, 0xffc8d0c8);
+        DWORD alpha = c.strength < .7f && ((now / 400) & 1) ? 0x70000000 : 0xff000000; // Danger blinks
+        if (UpdateText(device, g_hudCondition[i], c.name, std::max(12, (int)((i ? 20 : 24) * u)), "Georgia"))
+            HudText(device, g_hudCondition[i], x + W - g_hudCondition[i].width - 8 * u, y + 2 * u, alpha | c.color);
+        top = y;
+    }
+    return top;
 }
 
 const char* kHelp =
@@ -4389,19 +4704,21 @@ void DrawOverlay(IDirect3DDevice9* device)
             float m = h * .03f;
             DrawPanel(device, g_helpText, m, m, 0xffffffff);
         }
+        float hudTop = h;
         if (drawMw2)
         {
-            // Leon's health (RE4 owns health): bar bottom left, red screen edges when hurt.
+            // Leon's health (RE4 owns health) and Ashley's (or Luis's) in the HUD style picked in Settings; RE4's
+            // own HUD is hidden while MW2 has control. Red screen edges when Leon is hurt.
             uint8_t* g = Global();
             int hp = g ? At<int16_t>(g, re4::G_plHp) : 0, hpMax = g ? std::max<int>(1, At<int16_t>(g, re4::G_plHpMax)) : 1;
             float frac = std::clamp((float)hp / hpMax, 0.f, 1.f);
-            float bx = w * .025f, by = h * .93f, bw = w * .16f, bh = std::max(8.f, h * .014f);
+            uint8_t* partner = g ? Partner() : nullptr;
+            int ahp = partner ? At<int16_t>(g, re4::G_subHp) : 0;
+            int ahpMax = partner ? std::max<int>(1, At<int16_t>(g, re4::G_subHpMax)) : 1;
+            float af = std::clamp((float)ahp / ahpMax, 0.f, 1.f);
+            const char* partnerName = partner && At<uint8_t>(partner, re4::Model_id) == 0x04 ? "LUIS" : "ASHLEY";
             device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
             device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
-            Quad(device, bx - 3, by - 3, bw + 6, bh + 6, 0xc0181818);
-            Quad(device, bx, by, bw, bh, 0xff505050);
-            if (frac > 0)
-                Quad(device, bx, by, bw * frac, bh, frac < .3f ? 0xffdf4545 : (frac < .6f ? 0xffe0c040 : 0xff7ed091));
             DWORD now = GetTickCount();
             if (now < g_damageUntil)
             {
@@ -4412,37 +4729,45 @@ void DrawOverlay(IDirect3DDevice9* device)
                 Quad(device, 0, h * .045f, w * .025f, h * .91f, c);
                 Quad(device, w * .975f, h * .045f, w * .025f, h * .91f, c);
             }
-            if (uint8_t* partner = g ? Partner() : nullptr)
+            if (g_cfg.hudStyle == 1)
+                hudTop = DrawRe4Hud(device, h, frac, partner ? &af : nullptr, partnerName);
+            else if (g_cfg.hudStyle == 2)
+                hudTop = DrawRe2Hud(device, h, frac, partner ? &af : nullptr, partnerName);
+            else
             {
-                // Ashley's (or Luis's) health, next to Leon's: RE4's own HUD is hidden while MW2 has control
-                int ahp = At<int16_t>(g, re4::G_subHp), ahpMax = std::max<int>(1, At<int16_t>(g, re4::G_subHpMax));
-                float af = std::clamp((float)ahp / ahpMax, 0.f, 1.f);
-                float ax = bx + bw + w * .03f, aw = bw * .75f;
+                float bx = w * .025f, by = h * .93f, bw = w * .16f, bh = std::max(8.f, h * .014f);
                 device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
                 device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
-                Quad(device, ax - 3, by - 3, aw + 6, bh + 6, 0xc0181818);
-                Quad(device, ax, by, aw, bh, 0xff505050);
-                if (af > 0)
-                    Quad(device, ax, by, aw * af, bh, af < .3f ? 0xffdf4545 : 0xffe8a0c8);
-                uint8_t id = At<uint8_t>(partner, re4::Model_id);
-                char aText[48];
-                snprintf(aText, sizeof(aText), "%s %d / %d", id == 0x04 ? "LUIS" : "ASHLEY", std::max(0, ahp), ahpMax);
-                if (UpdateText(device, g_partnerText, aText, std::max(10, textPx * 4 / 5)))
+                Quad(device, bx - 3, by - 3, bw + 6, bh + 6, 0xc0181818);
+                Quad(device, bx, by, bw, bh, 0xff505050);
+                if (frac > 0)
+                    Quad(device, bx, by, bw * frac, bh, frac < .3f ? 0xffdf4545 : (frac < .6f ? 0xffe0c040 : 0xff7ed091));
+                if (partner)
+                {
+                    float ax = bx + bw + w * .03f, aw = bw * .75f;
+                    Quad(device, ax - 3, by - 3, aw + 6, bh + 6, 0xc0181818);
+                    Quad(device, ax, by, aw, bh, 0xff505050);
+                    if (af > 0)
+                        Quad(device, ax, by, aw * af, bh, af < .3f ? 0xffdf4545 : 0xffe8a0c8);
+                    char aText[48];
+                    snprintf(aText, sizeof(aText), "%s %d / %d", partnerName, std::max(0, ahp), ahpMax);
+                    if (UpdateText(device, g_partnerText, aText, std::max(10, textPx * 4 / 5)))
+                    {
+                        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+                        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
+                        HudText(device, g_partnerText, ax, by - g_partnerText.height - 3.f, 0xffffffff);
+                        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+                        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG2);
+                    }
+                }
+                char hpText[32];
+                snprintf(hpText, sizeof(hpText), "HP %d / %d", std::max(0, hp), hpMax);
+                if (UpdateText(device, g_hpText, hpText, std::max(10, textPx * 4 / 5)))
                 {
                     device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
                     device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-                    Quad(device, ax + 1, by - g_partnerText.height - 2.f, (float)g_partnerText.width, (float)g_partnerText.height, 0xff000000, g_partnerText.texture);
-                    Quad(device, ax, by - g_partnerText.height - 3.f, (float)g_partnerText.width, (float)g_partnerText.height, 0xffffffff, g_partnerText.texture);
+                    HudText(device, g_hpText, bx, by - g_hpText.height - 3.f, 0xffffffff);
                 }
-            }
-            char hpText[32];
-            snprintf(hpText, sizeof(hpText), "HP %d / %d", std::max(0, hp), hpMax);
-            if (UpdateText(device, g_hpText, hpText, std::max(10, textPx * 4 / 5)))
-            {
-                device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_MODULATE);
-                device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_MODULATE);
-                Quad(device, bx + 1, by - g_hpText.height - 2.f, (float)g_hpText.width, (float)g_hpText.height, 0xff000000, g_hpText.texture);
-                Quad(device, bx, by - g_hpText.height - 3.f, (float)g_hpText.width, (float)g_hpText.height, 0xffffffff, g_hpText.texture);
             }
         }
         if (drawMw2 && g_menuOpen && UpdateText(device, g_menuText, MenuText(), textPx))
@@ -4450,7 +4775,8 @@ void DrawOverlay(IDirect3DDevice9* device)
         if (gunList && UpdateText(device, g_gunListText, GunListText(), std::max(10, textPx * 4 / 5)))
             DrawPanel(device, g_gunListText, w - g_gunListText.width - h * .02f, h * .98f - g_gunListText.height, 0xffffd746);
         if (drawMw2 && GetTickCount() < g_noticeUntil && UpdateText(device, g_noticeText, g_notice, textPx))
-            DrawPanel(device, g_noticeText, h * .03f, h * .80f, 0xffffd746);
+            DrawPanel(device, g_noticeText, h * .03f,
+                      std::min(h * .80f, hudTop - g_noticeText.height - g_noticeText.pixelHeight * 1.5f), 0xffffd746);
         device->EndScene();
     }
     if (previousTarget)

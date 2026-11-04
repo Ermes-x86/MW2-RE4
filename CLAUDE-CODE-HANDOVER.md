@@ -314,6 +314,16 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
 
+## v50 (2026-11-04): RE4 / RE2 style health HUD
+- Settings row 10 HEALTH HUD STYLE (INI `HudStyle`, default 1): 0 = the old flat bars, 1 = RE4 style (dark dial bottom left with
+  MW2's clip and reserve, Leon's curved life band around it, Ashley's/Luis's thinner band above with her name; green > 50%,
+  yellow > 25%, red and blinking below), 2 = RE2 classic (heart monitor per character: grid, sweeping trace with a fading tail,
+  Fine / Caution (yellow, orange) / Danger with faster beat; Danger blinks). Restart row moved to 11.
+- All drawn in code (`HudImage` CPU textures, D3DPOOL_MANAGED; gauge redrawn only when health/blink changes, monitors every
+  frame with a cached grid). No game images. Notices move up above the HUD. `UpdateText` takes a font face (Georgia for RE2).
+- Offline render check of the paint code (scratchpad hudtest); in-game look untested. Deployed 2026-11-04 (backup
+  MW2RE4.before-v50-20261104-160344.*).
+
 ## v49 (2026-10-30): CONTROLLER tab (button remapping)
 - New F10 tab CONTROLLER (TAB_PAD, before CONTROLS): one row per PadAction (15) -> PadInput (A..DPAD_RIGHT, LT/RT as
   triggers > 0.3, NONE). Left/Right cycles, Enter/A captures the next pad press (Esc/Backspace or 6 s cancels). An input
