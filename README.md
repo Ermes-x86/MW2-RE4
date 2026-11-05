@@ -100,8 +100,10 @@ To remove the mod, run **`Uninstall-MW2RE4.bat`**.
 
 ## Play
 
-Start Resident Evil 4, load your game, and press **F6**. The first start
-prepares MW2 assets and takes about a minute.
+Start Resident Evil 4, load your game, and press **F6**. MW2 then loads in
+the background: two to three minutes (longer the very first time, when it
+prepares its assets). The small box in the top left says "MW2 loading" until
+it is ready; after that F6 switches MW2 on and off at once.
 
 | Key | Action |
 |---|---|
@@ -210,7 +212,7 @@ section of `MW2RE4.ini`.
 - **The first start is slow.** The first time, the mod builds about 1 GB of
   MW2 texture and shader cache in `<runtime folder>\iw4l-artifacts\cache`.
   That can take several minutes on a slower CPU or a hard drive; later starts
-  take about a minute. Keep the game running until it is ready. If it is
+  take two to three minutes. Keep the game running until it is ready. If it is
   stopped, the part already built is kept, so the next try is faster.
 - **"MW2 runtime stopped" or "MW2 startup timed out".** Press F6 to retry. The
   runtime log is `<runtime folder>\iw4l-artifacts\logs\latest.log`; check that

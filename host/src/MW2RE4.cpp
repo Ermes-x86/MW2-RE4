@@ -5090,7 +5090,7 @@ DWORD WINAPI StartBridge(void*)
 {
     if (!CreateBridge())
         Log("shared memory failed; MW2 cannot start");
-    Log("ready: load a save, then press F6 to start MW2 (about a minute the first time)");
+    Log("ready: load a save, then press F6 to start MW2 (it loads for two to three minutes)");
     return 0;
 }
 } // namespace

@@ -1089,6 +1089,57 @@ index 2958b9b..7b211be 100644
          } else {
              fs::rename(&temporary, path)?;
          }
+diff --git a/crates/console/src/plugin/dispatch_state.rs b/crates/console/src/plugin/dispatch_state.rs
+index 5c73b52..0f54400 100644
+--- a/crates/console/src/plugin/dispatch_state.rs
++++ b/crates/console/src/plugin/dispatch_state.rs
+@@ -79,6 +79,9 @@ pub struct WaitMovePose {
+ }
+ 
+ pub(super) const WAIT_WORLD_TIMEOUT_SECS: f32 = 120.0;
++/// `wait world` covers a whole cold map load (shader pipelines included), which takes over two minutes
++/// on slower drives; the RE4 host gives up on its own after 15 minutes.
++pub(super) const WAIT_WORLD_LOAD_TIMEOUT_SECS: f32 = 900.0;
+ 
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ pub(crate) enum WaitKind {
+diff --git a/crates/console/src/plugin/mod.rs b/crates/console/src/plugin/mod.rs
+index f38904e..7b5219c 100644
+--- a/crates/console/src/plugin/mod.rs
++++ b/crates/console/src/plugin/mod.rs
+@@ -34,7 +34,7 @@ mod dispatch_state;
+ mod state;
+ 
+ pub use dispatch_state::{ConsoleCommandQueue, ConsoleDispatch, WaitMovePose};
+-use dispatch_state::{WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args};
++use dispatch_state::{WAIT_WORLD_LOAD_TIMEOUT_SECS, WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args};
+ pub use state::{ConsoleFont, ConsoleSettings, ConsoleState};
+ 
+ const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FiraMono-Regular.ttf");
+@@ -1835,8 +1835,13 @@ fn abort_script_on_wait_timeout(
+         .retain(|cmd| matches!(cmd.name.as_str(), "quit" | "exit" | "finish_run"));
+     let kept = queue.0.len();
+     let dropped = before - kept;
++    let secs = if kind == "wait world" {
++        WAIT_WORLD_LOAD_TIMEOUT_SECS
++    } else {
++        WAIT_WORLD_TIMEOUT_SECS
++    };
+     let msg = format!(
+-        "{kind}: timed out after {WAIT_WORLD_TIMEOUT_SECS:.0}s ({detail}) — \
++        "{kind}: timed out after {secs:.0}s ({detail}) — \
+          script aborted, {dropped} queued commands dropped, kept exit={kept}"
+     );
+     diag::warn!(Console, "{msg}");
+@@ -1919,7 +1924,7 @@ fn dispatch_console_command(
+             );
+         } else {
+             dispatch.wait_world_elapsed += time.delta_secs();
+-            if dispatch.wait_world_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
++            if dispatch.wait_world_elapsed >= WAIT_WORLD_LOAD_TIMEOUT_SECS {
+                 dispatch.wait_world = false;
+                 abort_script_on_wait_timeout(
+                     "wait world",
 diff --git a/crates/fastfile_iw4/src/load/weapon.rs b/crates/fastfile_iw4/src/load/weapon.rs
 index fb04dfb..be4f217 100644
 --- a/crates/fastfile_iw4/src/load/weapon.rs

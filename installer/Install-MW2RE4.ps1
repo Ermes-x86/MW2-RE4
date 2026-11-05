@@ -317,6 +317,6 @@ Say 'MW2-RE4 installed.' Green
 if (Test-Path $backup) { Say "Replaced files were backed up to: $backup" }
 Say ''
 Say 'How to play:' Cyan
-Say '  Start Resident Evil 4, load your game, then press F6. The first start'
-Say '  prepares MW2 assets and can take about a minute.'
-Say '  F6 on/off  F7 controls  F10 settings  F11 gun damage  F5 gun list  1 next gun  E use'
+Say '  Start Resident Evil 4, load your game, then press F6. MW2 loads for two to'
+Say '  three minutes (longer the very first time); the top left box says MW2 loading.'
+Say '  F6 on/off  F7 controls  F10 MW2 menu  F5 gun list  1 next gun  E use'

@@ -321,6 +321,11 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   Fine / Caution (yellow, orange) / Danger with faster beat; Danger blinks). Restart row moved to 11.
 - All drawn in code (`HudImage` CPU textures, D3DPOOL_MANAGED; gauge redrawn only when health/blink changes, monitors every
   frame with a cached grid). No game images. Notices move up above the HUD. `UpdateText` takes a font face (Georgia for RE2).
+- 2026-11-04 fix: F6 never finished ("MW2 loading" forever). Runtime log: `wait world: timed out after 120s (spawned=false) —
+  script aborted`: the cold map load now takes 121-162 s on this PC (GPU pipeline warm ~120 s every start), over the console's
+  120 s `wait world` limit, so `spawn 0` never ran. Runtime: `WAIT_WORLD_LOAD_TIMEOUT_SECS = 900` for `wait world` only
+  (console/plugin/dispatch_state.rs, mod.rs); other waits keep 120 s. The 0.1.6 release has the 120 s limit too.
+  Load-time text (README, installer, plugin log) now says two to three minutes. Backups *.before-v50-20261104-225826.*
 - Offline render check of the paint code (scratchpad hudtest); in-game look untested. Deployed 2026-11-04 (backup
   MW2RE4.before-v50-20261104-160344.*).
 
