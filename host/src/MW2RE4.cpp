@@ -23,7 +23,7 @@
 namespace
 {
 using namespace mw2gta;
-constexpr const char* kVersion = "MW2RE4 v50 (RE4 / RE2 style health HUD)";
+constexpr const char* kVersion = "MW2RE4 v50 (0.1.7-beta)";
 constexpr float Pi = 3.14159265358979323846f;
 
 // ---------------------------------------------------------------- log

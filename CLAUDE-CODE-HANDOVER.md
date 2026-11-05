@@ -314,6 +314,12 @@ See the report in chat on 2026-10-17: IW4L copy + bridge protocol, MW2 camera/in
   site already hooked. Tested in game with re4_tweaks (MW2 ready, mouse works,
   F11 damage sliders work: the thunk is hooked once; re4_tweaks only patches bytes inside LifeDownSet2 for its trainer).
 
+## 0.1.7-beta (2026-11-05): released
+
+- Tested in game by the user (v48-v50 + wait-world fix). Plugin v50 with version string "0.1.7-beta", runtime iw4l-source
+  b7ebef5 (same exe as deployed, sha 64f59850...). Zip dist\MW2-RE4-0.1.7-beta.zip (built with -KeepLocalPaths as before).
+  Game backup `Bin32\MW2RE4.before-0.1.7-20261105-115847.asi.bak`.
+
 ## v50 (2026-11-04): RE4 / RE2 style health HUD
 - Settings row 10 HEALTH HUD STYLE (INI `HudStyle`, default 1): 0 = the old flat bars, 1 = RE4 style (dark dial bottom left with
   MW2's clip and reserve, Leon's curved life band around it, Ashley's/Luis's thinner band above with her name; green > 50%,

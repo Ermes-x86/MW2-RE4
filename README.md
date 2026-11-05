@@ -224,6 +224,9 @@ section of `MW2RE4.ini`.
   0.1.5: update and press F6 again.
 - **RE4 crashes before the menu, or on F6, with re4_tweaks installed.** Fixed
   in 0.1.5: update.
+- **MW2 stays on "MW2 loading" and never appears**, and the runtime log says
+  `wait world: timed out after 120s`. MW2 gave up when its map took more than
+  two minutes to load. Fixed in 0.1.7: update and press F6 again.
 - **MW2 is in the way in a special section.** Press F6 to give RE4 full
   control, and F6 again afterwards.
 
