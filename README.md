@@ -121,9 +121,31 @@ it is ready; after that F6 switches MW2 on and off at once.
 | F5 | Show or hide the RE4 -> MW2 gun list in the case and at the merchant |
 | F7 | Show or hide the controls panel |
 
+### Xbox controller
+
+An Xbox controller (or any XInput pad) plays MW2 while it has control; RE4
+gets the pad back whenever MW2 steps aside. The buttons can be changed in the
+CONTROLLER tab of the F10 menu.
+
+| Button | Action |
+|---|---|
+| Left stick / right stick | Move / look |
+| RT / LT | Fire / aim |
+| X | Reload, and RE4's action button (doors, items, the merchant) |
+| Y | Next gun |
+| A / B | Jump / crouch |
+| D-pad down | Prone |
+| RB / LB | Hand grenade / flash grenade |
+| L3 / R3 | Sprint / melee |
+| Back | Attache case |
+| D-pad left / right | Ashley / map |
+| D-pad up | The MW2 menu (D-pad, A, B, LB / RB move through it) |
+| Start | RE4's pause |
+| L3 + R3 held | MW2 mode on/off (like F6) |
+
 ### The MW2 menu (F10)
 
-One menu with five tabs. **Q / E** (or Tab) change the tab, **Up / Down**
+One menu with six tabs. **Q / E** (or Tab) change the tab, **Up / Down**
 choose a row, **Left / Right** change it, **Enter** uses it, **F10** or
 **Backspace** closes it. Everything is saved to `Resident Evil 4\Bin32\MW2RE4.ini`.
 
@@ -133,6 +155,7 @@ choose a row, **Left / Right** change it, **Enter** uses it, **F10** or
 | Guns | Which MW2 gun stands for the RE4 gun Leon has equipped (ammo stays RE4's) |
 | Damage | Gun damage multipliers per class (1.0 = exactly the RE4 gun's damage) |
 | Balancing | Difficulty settings to make MW2's speed fair against RE4 (below) |
+| Controller | The Xbox controller buttons: pick a button for each action (or press it), swap sticks, invert look, reset to defaults |
 | Controls | The full key list |
 
 **MW2 resolution.** MW2's gun and HUD are drawn at 960x540 by default and
